@@ -1,0 +1,94 @@
+"""Semantic answer cache.
+
+Production RAG systems short-circuit repeated (or near-identical) questions
+with an embedding-similarity cache — a hit skips retrieval, reranking, and
+generation entirely, turning a multi-second answer into milliseconds.
+
+Entries are keyed to a corpus+model fingerprint: any ingest/delete or model
+change invalidates the whole cache, so a hit can never serve an answer from
+stale evidence. Only verified, non-refusal answers are cached.
+
+Stores plain dicts (not engine dataclasses) to stay import-cycle-free.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+from pathlib import Path
+
+from .config import settings
+
+
+def _cache_path() -> Path:
+    return settings.data_path / "answer_cache.json"
+
+
+def corpus_fingerprint() -> str:
+    from .ingest import load_manifest
+
+    manifest = load_manifest()
+    key = json.dumps(
+        {name: info.get("ingested_at") for name, info in sorted(manifest.items())},
+        sort_keys=True,
+    )
+    key += f"|{settings.ollama_model}|{settings.embedding_model}"
+    return hashlib.sha1(key.encode()).hexdigest()
+
+
+def _load() -> list[dict]:
+    path = _cache_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return []
+    return []
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
+def lookup(question: str, query_embedding: list[float]) -> dict | None:
+    if not settings.cache_enabled:
+        return None
+    fingerprint = corpus_fingerprint()
+    normalized = " ".join(question.lower().split())
+    best: dict | None = None
+    best_sim = 0.0
+    for entry in _load():
+        if entry.get("fingerprint") != fingerprint:
+            continue
+        if entry.get("normalized_question") == normalized:
+            return entry  # exact hit
+        sim = _cosine(query_embedding, entry.get("embedding", []))
+        if sim >= settings.cache_similarity and sim > best_sim:
+            best, best_sim = entry, sim
+    return best
+
+
+def store(question: str, query_embedding: list[float], result_payload: dict) -> None:
+    if not settings.cache_enabled:
+        return
+    fingerprint = corpus_fingerprint()
+    entries = [e for e in _load() if e.get("fingerprint") == fingerprint]
+    entries.append(
+        {
+            "fingerprint": fingerprint,
+            "question": question,
+            "normalized_question": " ".join(question.lower().split()),
+            "embedding": query_embedding,
+            **result_payload,
+        }
+    )
+    entries = entries[-settings.cache_max_entries:]
+    _cache_path().write_text(json.dumps(entries), encoding="utf-8")
+
+
+def clear() -> None:
+    _cache_path().unlink(missing_ok=True)

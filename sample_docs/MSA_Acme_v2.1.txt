@@ -1,0 +1,45 @@
+MASTER SERVICES AGREEMENT (AMENDED AND RESTATED)
+
+This Amended and Restated Master Services Agreement supersedes the Master
+Services Agreement version 1.0 between Acme Consulting LLC ("Provider") and
+the undersigned client.
+
+Client: Jonathan Meyers
+Client ID: ACM-20419
+Contact email: j.meyers@example-corp.com
+
+Clause 1. Services
+The Provider shall deliver the consulting services described in Exhibit A,
+as amended by Change Order CO-2025-07. Exhibit A and all executed Change
+Orders are incorporated by reference.
+
+Clause 2. Fees and Payment
+The Client shall pay a monthly retainer of USD 15,000, due within
+forty-five (45) days of invoice. Late payments accrue interest at 1.0% per
+month.
+
+Clause 3. Term
+This Agreement commences on the Restatement Date and continues for an
+initial term of twenty-four (24) months. Renewal is NOT automatic: the
+Agreement renews only by written amendment signed by both parties.
+
+Clause 4. Termination
+Either party may terminate this Agreement for convenience upon sixty (60)
+days' prior written notice. Either party may terminate immediately upon a
+material breach that remains uncured for thirty (30) days after written
+notice of the breach. The Provider may additionally suspend services if any
+invoice remains unpaid for more than sixty (60) days.
+
+Clause 5. Confidentiality
+Each party shall protect the other party's Confidential Information with at
+least reasonable care. Confidentiality obligations survive termination for
+five (5) years.
+
+Clause 6. Limitation of Liability
+Neither party's aggregate liability under this Agreement shall exceed two
+times (2x) the fees paid or payable in the twelve (12) months preceding the
+claim. Neither party is liable for indirect, incidental, or consequential
+damages, except for breaches of Clause 5 (Confidentiality).
+
+Clause 7. Governing Law
+This Agreement is governed by the laws of the State of New York.

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lexis-ui",
+      "runtimeExecutable": ".venv/Scripts/python",
+      "runtimeArgs": ["-m", "streamlit", "run", "ui/app.py", "--server.port", "8501", "--server.headless", "true"],
+      "port": 8501
+    }
+  ]
+}
