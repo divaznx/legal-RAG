@@ -78,9 +78,11 @@ Never fabricate document names, pages, clauses, sections, or versions —
 use only values that appear verbatim in the chunk headers.
 
 NEVER copy full chunk headers ("[Chunk N] Document: ... | OCR: ...") into
-your output — always use the compact (Source: ...) form instead. Be
-concise: no preamble, no repetition of the question, no restating chunk
-text you already cited.
+your output — always use the compact (Source: ...) form instead. Never
+refer to "Chunk 1", "Chunk 2", or any retrieval-internal identifier in
+your output; refer to evidence by document name, version, and clause
+title. Be concise: no preamble, no repetition of the question, no
+restating chunk text you already cited.
 
 # OUTPUT FORMAT (mandatory)
 
@@ -112,23 +114,67 @@ retrieved documents state".
 
 
 def format_context(chunks) -> str:
-    """Render retrieved chunks in the exact format the system prompt promises."""
+    """Render retrieved chunks in the exact format the system prompt promises.
+
+    A chunk may carry one level of parent-section context (parent-child
+    retrieval); it is rendered as a clearly delimited sub-block of the same
+    chunk so the model cites the child chunk's document/page. Table chunks
+    are marked so their layout is treated as a table, not prose."""
     blocks = []
     for i, c in enumerate(chunks, start=1):
         section = c.section or "-"
-        blocks.append(
+        table_tag = " | TABLE (structure preserved — do not flatten)" if getattr(c, "is_table", False) else ""
+        block = (
             f"[Chunk {i}] Document: {c.document} | Page: {c.page} | Section: {section} "
-            f"| Version: {c.version} | OCR: {c.ocr_source} (confidence {c.ocr_confidence:.2f})\n"
-            f"{c.text}"
+            f"| Version: {c.version} | OCR: {c.ocr_source} (confidence {c.ocr_confidence:.2f})"
+            f"{table_tag}\n{c.text}"
         )
+        parent = getattr(c, "parent_context", None)
+        if parent:
+            block += (
+                f"\n[Parent context for Chunk {i} — {c.parent_section}, same document/page]\n"
+                f"{parent}"
+            )
+        blocks.append(block)
     return "\n\n".join(blocks)
 
 
-def user_message(question: str, chunks) -> str:
+# Structured layout for whole-document overview answers (Feature: Document
+# Overview). Headings without supporting evidence are omitted, never invented.
+OVERVIEW_FORMAT = """For this document-overview question, organize the ## Answer
+section under these sub-headings, in this order, each bullet ending with a
+(Source: ...) citation. OMIT any sub-heading the retrieved evidence does not
+support — never invent content to fill one:
+
+### Overview
+### Parties
+### Key Terms
+### Important Provisions
+### Financial Terms
+### Termination
+
+Then continue with the mandatory ## Evidence Used, ## Limitations, and
+## Confidence sections as usual."""
+
+
+# No-speculation contract for breach/consequence questions (Feature:
+# Consequence Analysis). The engine retrieves the referenced clause plus the
+# consequence provisions; the model must not fill gaps from legal intuition.
+CONSEQUENCE_FORMAT = """This is a consequence/breach question. Answer it using the
+retrieved provisions that actually define consequences (termination, default,
+remedies, damages, limitation of liability, indemnification, governing law,
+survival), citing each. If the retrieved evidence does not specify the
+consequences of the breach asked about, state plainly that the retrieved
+documents do not define them — NEVER infer consequences from general legal
+knowledge."""
+
+
+def user_message(question: str, chunks, format_hint: str | None = None) -> str:
+    hint = f"\n\n{format_hint}\n" if format_hint else ""
     return (
         "RETRIEVED CONTEXT:\n\n"
         f"{format_context(chunks)}\n\n"
         "----------------------------------------\n"
-        f"QUESTION: {question}\n\n"
+        f"QUESTION: {question}\n{hint}\n"
         "Answer using ONLY the retrieved context above, in the mandatory output format."
     )

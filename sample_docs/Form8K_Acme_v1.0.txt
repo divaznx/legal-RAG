@@ -1,0 +1,24 @@
+FORM 8-K CURRENT REPORT
+
+Acme Consulting LLC
+
+Item 1.01 Entry into a Material Definitive Agreement
+
+On July 15, 2026, Acme Consulting LLC entered into an Amended and Restated
+Master Services Agreement with its client. The agreement provides for a
+monthly retainer of USD 15,000, an initial term of twenty-four (24) months,
+and termination for convenience upon sixty (60) days' prior written notice.
+The full text of the agreement is filed as Exhibit 10.1 to this Current
+Report.
+
+Item 3.03 Material Modification to Rights of Security Holders
+
+The information set forth in Item 1.01 of this Current Report is
+incorporated by reference into this Item 3.03. The modifications to
+contractual rights described therein apply pursuant to Clause 4 of the
+underlying agreement.
+
+Item 9.01 Financial Statements and Exhibits
+
+Exhibit 10.1 — Amended and Restated Master Services Agreement, dated
+July 15, 2026.

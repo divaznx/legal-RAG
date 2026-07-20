@@ -1,0 +1,205 @@
+[
+  {
+    "id": "payment-retainer",
+    "question": "What is the monthly retainer?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 2"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 2"
+      }
+    ]
+  },
+  {
+    "id": "termination-notice",
+    "question": "What is the termination notice period for convenience?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 4"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 4"
+      }
+    ]
+  },
+  {
+    "id": "entity-client",
+    "question": "Who is the client?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Preamble"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Preamble"
+      }
+    ]
+  },
+  {
+    "id": "confidentiality-survival",
+    "question": "How long do confidentiality obligations survive termination?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 5"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 5"
+      }
+    ]
+  },
+  {
+    "id": "liability-cap",
+    "question": "What is the limitation of liability cap?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 6"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 6"
+      }
+    ]
+  },
+  {
+    "id": "governing-law",
+    "question": "Which state's law governs the agreement?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 7"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 7"
+      }
+    ]
+  },
+  {
+    "id": "comparison-versions",
+    "question": "What changed between version 1.0 and version 2.1 of the MSA?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt"
+      }
+    ]
+  },
+  {
+    "id": "multi-part-client-payment",
+    "question": "Who is the client and what are the payment terms?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Preamble"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 2"
+      }
+    ]
+  },
+  {
+    "id": "auto-renewal",
+    "question": "Does the agreement renew automatically?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 3"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 3"
+      }
+    ]
+  },
+  {
+    "id": "off-domain-refusal",
+    "question": "What is the best sourdough bread recipe?",
+    "relevant": [],
+    "expect_refusal": true
+  },
+  {
+    "id": "clause-lookup-direct",
+    "question": "What does Clause 6 state?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 6"
+      }
+    ]
+  },
+  {
+    "id": "clause-lookup-versioned",
+    "question": "What does Clause 2 of MSA_Acme v1.0 say about fees?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v1.0.txt",
+        "section": "Clause 2"
+      }
+    ]
+  },
+  {
+    "id": "overview-msa",
+    "k": 8,
+    "question": "Give me an overview of the MSA Acme agreement",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Preamble"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 2"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 4"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 5"
+      }
+    ]
+  },
+  {
+    "id": "consequence-breach",
+    "k": 6,
+    "question": "What happens if the Client breaches the MSA Acme agreement?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 4"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 6"
+      }
+    ]
+  },
+  {
+    "id": "obligations-client",
+    "k": 6,
+    "question": "What are the Client's obligations under the MSA Acme agreement?",
+    "relevant": [
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 2"
+      },
+      {
+        "document": "MSA_Acme_v2.1.txt",
+        "section": "Clause 5"
+      }
+    ]
+  }
+]

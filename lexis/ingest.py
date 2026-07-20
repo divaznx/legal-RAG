@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import chunking, embeddings, parsing, redaction, vector_store
+from . import chunking, embeddings, graph, metadata, parsing, redaction, vector_store
 from .config import settings
 
 
@@ -56,7 +56,14 @@ def ingest_file(path: str | Path) -> IngestReport:
         page.text = result.text
         redaction_counts.update(result.counts)
 
-    chunks = chunking.chunk_pages(pages, document=document, version=version)
+    # Document-level metadata is extracted from the *redacted* text so no
+    # raw PII can leak into payload metadata either.
+    full_text = "\n\n".join(p.text for p in pages)
+    doc_meta = metadata.extract_doc_meta(path, full_text, tenant=settings.tenant)
+
+    chunks = chunking.chunk_pages(
+        pages, document=document, version=version, doc_meta=doc_meta.payload()
+    )
     if not chunks:
         raise ValueError(f"No extractable text in {document}")
 
@@ -67,6 +74,7 @@ def ingest_file(path: str | Path) -> IngestReport:
     # Re-ingest safely: clear any previous vectors for this document first.
     vector_store.delete_document(document)
     vector_store.upsert_chunks(chunks, dense_vectors, sparse_vectors)
+    graph.update_graph(document, chunks)
 
     report = IngestReport(
         document=document,
@@ -89,6 +97,7 @@ def delete_document(document: str) -> bool:
     if document not in manifest:
         return False
     vector_store.delete_document(document)
+    graph.remove_document(document)
     del manifest[document]
     _save_manifest(manifest)
     return True

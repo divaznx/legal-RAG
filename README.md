@@ -74,6 +74,76 @@ measurement. In-domain-but-unanswerable questions (e.g. GDPR against an
 MSA corpus) pass the dense gate deliberately — the grounded LLM refusal
 plus the citation verifier are the correct guardrail for those.
 
+## Production upgrade pack (15 features, all measurable)
+
+Incremental upgrades layered onto the stable pipeline — nothing was
+redesigned, every default preserves prior behavior or is config-gated
+(`lexis/config.py`):
+
+| # | Feature | Where | Notes |
+|---|---------|-------|-------|
+| 1 | Parent-child retrieval | `chunking.parent_of`, `packing.attach_parents` | "Clause 4.2" chunks attach one level of "Clause 4" context; skipped if the parent is already retrieved |
+| 2 | Context validation & packing | `lexis/packing.py` | dedupe, overlap-merge, repeated-heading strip, document order — LLM sees clean context; verification uses originals |
+| 3 | Query classification | `lexis/query.py::classify` | 11 rule-based classes; entity/clause lookups weight BM25 1.5x, summarization widens k, comparison routes per-document |
+| 4 | Query rewriting | `query.py::rewrite` | legal synonym expansion, internal only, capped at `QUERY_REWRITE_MAX_VARIANTS` |
+| 5 | Query decomposition | `query.py::decompose` | "Who is the client and what are the payment terms?" retrieves each part independently, evidence merged via RRF |
+| 6 | Definition-aware retrieval | `chunking.extract_defined_terms` + engine boost | chunks *defining* a term used in the question boost to 0.98 — definitions precede ordinary language |
+| 7 | Metadata enrichment | `lexis/metadata.py` | document_type, agreement_type, jurisdiction, effective_date, confidentiality_level, language stamped per chunk |
+| 8 | Retrieval explainability | `RetrievedChunk.diagnostics()` | BM25/dense/RRF/rerank scores, before/after ranks, match reasons; `cli.py ask --debug` or API `"debug": true` — never in normal answers |
+| 9 | Evaluation harness | `lexis/evaluation.py` + `eval/golden.json` | `python cli.py eval [--generate]` — Recall@K, Precision@K, MRR, nDCG, gate accuracy, citation accuracy, hallucination rate, latency |
+| 10 | Answer verification | `llm.verify_citations` + engine | fabricated clause numbers caught (lenient when unverifiable); one corrective regeneration on failure; `STRICT_VERIFICATION=true` refuses instead |
+| 11 | Version-aware retrieval | `retrieval.py` | latest version of a document family gets +0.05 post-rerank; comparison queries retrieve every version per-document |
+| 12 | Access control ready | payload `tenant/client/matter/permissions` | filter applied pre-retrieval only when `TENANT` is set — single-tenant deployments untouched |
+| 13 | Agentic retrieval | `retrieval.py::_agentic_attempts` | on gate miss: definitions search, then keyword broadening — max `AGENTIC_MAX_RETRIES`, then refuse |
+| 14 | Clause relationship graph | `lexis/graph.py` -> `data/clause_graph.json` | "Clause 6 references Clause 5" edges built at ingest; retrieval expansion opt-in via `GRAPH_ENABLED` |
+| 15 | Table preservation | `chunking.is_table_block` | pipe/columnar tables chunked atomically, never split or overlap-bled, marked `TABLE` in the prompt |
+| 16 | Clause-aware retrieval | `query.clause_references_in` + `retrieval` injection + engine boost | "Clause 7.2 / Section 8 / § 4" extracted from the query; the actual clause chunk is injected into candidates if hybrid search missed it and boosted to the top tier (0.995) — a chunk merely *referencing* the clause never outranks it. An explicit "v1.0" in the question pins the version and suspends latest-version preference |
+| 17 | Ambiguity detection | `engine._clause_ambiguity` | a clause matching multiple unrelated agreements returns a clarification request (pre-LLM, ~1.3s) instead of guessing; multiple versions of one agreement are all represented so differences are compared, never silently dropped |
+| 18 | Citation-failure taxonomy | `CitationReport.failure_reasons` | named reasons (fabricated_citation, clause_mismatch, missing_citations) logged to debug diagnostics and fed into the regeneration corrective note |
+
+| 19 | Intent: document overview | `query.QueryClass.OVERVIEW` + `retrieval.overview_chunks` | "explain/summarize the <agreement>" retrieves stratified evidence (parties, definitions, financial, termination, closing, …) across the target document instead of top-k similarity; answers render under structured headings; measured Recall@8 = 1.0 at 299ms retrieval on the 9-chunk MSA. Trade-off: more chunks + `OVERVIEW_MAX_TOKENS=1100` = longer generation |
+| 20 | Clause exact-only context | `CLAUSE_EXACT_ONLY` | when exact clause matches exist, only they (plus parent context) reach the LLM — unrelated clauses excluded from packing; document-scoped, so "Clause 5 of the MSA" never pulls Section 5.7 of an unrelated agreement |
+| 21 | Answer label hygiene | `engine._scrub_internal_labels` + prompt rule | "[Chunk N]" and bare "Chunk N" retrieval internals stripped from final answers; evidence referenced only by document/version/clause + (Source: …) citations |
+| 22 | Pipeline-versioned cache | `cache.corpus_fingerprint` includes `lexis.__version__` | answers generated by an older pipeline are never served after an upgrade — bump `__version__` on retrieval/prompt changes |
+| 23 | Cross-reference resolution | `chunking.extract_references` → `graph.py` → `packing.expand_references` | "incorporated by reference / subject to / pursuant to / see …" targets (Clause, Section, Article, Item 3.03, Exhibit A, Schedule 2.1, Appendix, Attachment) become graph edges at ingest; retrieval follows them breadth-first up to `GRAPH_MAX_DEPTH=2` chained hops, cycle-safe via a visited set, capped at `GRAPH_MAX_EXPANSION=3` extra chunks; each added chunk's `matched_on` records its path ("graph-reference:Item 3.03->Item 1.01") in debug mode. Keyword-aware matching: "Item 3.03" never cross-matches "Clause 3" — clause/section/article are synonyms, Item is a distinct numbering system |
+| 24 | Consequence-aware retrieval | `QueryClass.CONSEQUENCE` + probes + injection + boost | "What if I break Clause 3?" retrieves the clause PLUS the provisions defining consequences: three fixed probe queries (termination/remedies, liability/indemnification, governing-law/enforcement) RRF-fused with the question; named documents get their provision sections injected deterministically (fusion over a mixed corpus can crowd them out); a 0.9 ranking floor pins provisions — scoped to named documents so a 95-page merger agreement can't flood the tier; `final_k` widened to `CONSEQUENCE_FINAL_K=6`; clause exact-only narrowing is bypassed (the clause alone is exactly the wrong context); prompt contract: if the evidence doesn't define consequences, say so — never speculate. Measured: golden `consequence-breach` recall 0.50→1.00, MRR 0.17→1.00, nDCG 0.22→1.00 |
+| 25 | Legal concept graph | `query.LEGAL_CONCEPT_GRAPH` + `concept_probes` | related-provision probes retrieved alongside the question (confidentiality→survival/injunctive relief, payment→late interest/suspension, termination→return of property/survival, IP→ownership/assignment); bounded at 2 probes (`CONCEPT_EXPANSION`) |
+| 26 | Obligation duty retrieval | `query.obligation_subject/obligation_pattern` + retrieval injection | "the Client's obligations" = sentences where the Client (or both parties) shall/must — duty chunks fetched deterministically from named documents and floor-pinned at 0.9; identity boosts suppressed for this class. Measured: golden `obligations-client` recall 0.50→1.00, MRR 0.17→1.00 |
+| 27 | Jurisdiction preference | `engine._boost_jurisdiction_chunks` | a question naming a jurisdiction ("under Delaware law") bumps chunks whose jurisdiction metadata matches (`JURISDICTION_BOOST=0.05`) — legal systems are never silently mixed |
+| 28 | Named-document preference | engine post-rerank bump | chunks from documents the question names get +0.05 — the operative agreement outranks documents that merely describe it (an 8-K summarizing the MSA cannot beat the MSA itself); also lifted `comparison-versions` nDCG 0.88→1.00 |
+
+### Measured: clause-aware retrieval (features 16-17)
+
+Golden-set benchmark before/after (K=4, other 10 cases unchanged at 1.0):
+
+| Case | Metric | Before | After |
+|------|--------|--------|-------|
+| clause-lookup-versioned ("Clause 2 of MSA v1.0") | MRR | 0.50 | **1.00** |
+| clause-lookup-versioned | nDCG@4 | 0.63 | **1.00** |
+| overall (11 answerable cases) | MRR | 0.9545 | **1.0** |
+| overall | nDCG@4 | 0.9368 | **0.985** |
+
+The before-failure was real: asking about v1.0 ranked the v2.1 clause first
+because latest-version preference overrode the explicit version request.
+
+### Measured: clause-boundary chunking
+
+The eval harness (feature 9) immediately paid for itself: chunks used to
+aggregate 3–4 clauses under the first clause's section label, and overlap
+tails bled across clause boundaries. Flushing chunks at every heading
+(`CHUNK_AT_HEADINGS=true`, the new default) moved the golden-set metrics:
+
+| Metric | before | after |
+|---|---|---|
+| Recall@4 | 0.39 | **1.00** |
+| MRR | 0.59 | **1.00** |
+| nDCG@4 | 0.44 | **0.97** |
+| Retrieval success | 0.67 | **1.00** |
+| Gate accuracy | 1.00 | 1.00 |
+
+Re-ingest after changing chunking settings — chunk boundaries are decided
+at ingest time.
+
 ### Fact-aware retrieval
 
 Key-value fact blocks ("Client: …", "Client ID: …", "Effective Date: …")
@@ -138,6 +208,15 @@ streamlit run ui/app.py
 ```bash
 uvicorn api:app --reload --port 8000
 # POST /documents (multipart upload) · GET /documents · DELETE /documents/{name} · POST /ask
+# POST /ask with {"question": "...", "debug": true} adds retrieval diagnostics
+```
+
+**Benchmarks** (golden dataset in `eval/golden.json`):
+
+```bash
+python cli.py eval               # retrieval metrics — no LLM needed
+python cli.py eval --generate    # + citation accuracy / faithfulness / hallucination rate
+python cli.py ask "..." --debug  # per-chunk scores, ranks, and match reasons
 ```
 
 ⚠️ Embedded Qdrant is single-process: run the CLI, the API, **or** the UI at
@@ -164,27 +243,46 @@ Every answer carries two verdicts:
   PDFs without a text layer are flagged, not OCR'd — plug Tesseract into
   `parsing.py` to actually read them.
 - Citation verification checks that (document, page) pairs exist in the
-  retrieved set — it catches fabricated references and uncited answers, but
-  cannot prove the cited text semantically supports the sentence.
+  retrieved set and that cited clause numbers match retrieved sections — it
+  catches fabricated references, fabricated clause numbers, and uncited
+  answers, but cannot prove the cited text semantically supports the
+  sentence.
 - `.docx`/`.txt` have no page boundaries; they index as page 1.
+- Query classification/rewriting/decomposition are rule-based (regex +
+  synonym tables): deterministic, free, and unit-tested, but they won't
+  catch phrasings outside their patterns — extend the tables in
+  `lexis/query.py` as the corpus grows.
+- Metadata enrichment (jurisdiction, effective date, agreement type) is
+  heuristic regex over the redacted text; fields it can't find stay None
+  rather than being guessed.
+- The dense refusal gate was calibrated on 900-char chunks; clause-level
+  chunks shift the score distribution, and terse keyword-only junk queries
+  ("sourdough hydration schedule") can pass it. The grounded LLM refusal +
+  citation verifier remain the backstop, as designed.
 
 ## Layout
 
 ```
 lexis/
-  config.py        .env-driven settings (pydantic-settings)
+  config.py        .env-driven settings (pydantic-settings) — every feature has a knob
   redaction.py     PII -> [PLACEHOLDER] at ingest
   parsing.py       PDF/DOCX/TXT -> pages + OCR heuristic + version detection
-  chunking.py      section-aware chunks carrying full citation metadata
+  metadata.py      document-level enrichment (agreement type, jurisdiction, ...)
+  chunking.py      clause-boundary chunks: hierarchy, tables, defined terms, references
+  graph.py         clause relationship graph (ingest-built, retrieval opt-in)
   embeddings.py    fastembed (ONNX) wrapper
-  vector_store.py  Qdrant wrapper (embedded or server)
-  ingest.py        parse -> redact -> chunk -> embed -> upsert (+ manifest)
+  vector_store.py  Qdrant wrapper: weighted hybrid legs, filters, diagnostics
+  query.py         classification / rewriting / decomposition (rule-based)
+  retrieval.py     multi-query RRF fusion, comparison routing, versions, agentic ladder
+  packing.py       context dedupe/merge/order + parent-context attachment
+  ingest.py        parse -> redact -> enrich -> chunk -> embed -> upsert (+ manifest, graph)
   prompts.py       the Lexis Enterprise system prompt + context/citation contract
-  llm.py           Ollama call + mechanical citation verification
-  engine.py        retrieve -> generate -> verify -> computed confidence
-cli.py             ingest / ask / docs / delete
-api.py             FastAPI endpoints
+  llm.py           Ollama call + mechanical citation & clause verification
+  engine.py        retrieve -> rerank+boost -> pack -> generate -> verify (-> regenerate)
+  evaluation.py    golden-dataset benchmark: Recall@K, MRR, nDCG, hallucination rate
+cli.py             ingest / ask [--debug] / docs / delete / warm / eval
+api.py             FastAPI endpoints (debug flag supported)
 ui/app.py          Streamlit chat with verification badge + evidence panel
 sample_docs/       two MSA versions with PII and deliberate clause conflicts
+eval/golden.json   golden dataset for the benchmark suite
 ```
-More updates on the way.

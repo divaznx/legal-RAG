@@ -39,25 +39,32 @@ app = FastAPI(title="Lexis Enterprise", version="0.2.0", lifespan=lifespan)
 
 class AskRequest(BaseModel):
     question: str
+    debug: bool = False  # include retrieval diagnostics (developer use only)
 
 
 def _serialize(result: engine.AskResult) -> dict:
-    return {
+    payload = {
         "question": result.question,
         "answer": result.answer,
         "refused": result.refused,
         "confidence": result.confidence,
         "limitations": result.limitations,
         "cached": result.cached,
+        "query_class": result.query_class,
+        "regenerated": result.regenerated,
         "timings_ms": result.timings_ms,
         "citation_verification": {
             "passed": result.citations.passed,
             "total": result.citations.total,
             "verified": result.citations.verified,
             "fabricated": result.citations.fabricated,
+            "clause_mismatches": result.citations.clause_mismatches,
         },
         "retrieved_chunks": [asdict(c) for c in result.chunks],
     }
+    if result.debug is not None:
+        payload["retrieval_debug"] = result.debug
+    return payload
 
 
 @app.get("/health")
@@ -101,7 +108,7 @@ def _require_llm() -> None:
 @app.post("/ask")
 def ask(request: AskRequest) -> dict:
     _require_llm()
-    return _serialize(engine.ask(request.question))
+    return _serialize(engine.ask(request.question, debug=request.debug))
 
 
 @app.post("/ask/stream")
@@ -109,7 +116,7 @@ def ask_stream(request: AskRequest) -> StreamingResponse:
     _require_llm()
 
     def events():
-        for kind, payload in engine.ask_stream(request.question):
+        for kind, payload in engine.ask_stream(request.question, debug=request.debug):
             if kind == "delta":
                 yield f"event: delta\ndata: {json.dumps(payload)}\n\n"
             else:
