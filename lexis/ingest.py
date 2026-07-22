@@ -15,8 +15,10 @@ from pathlib import Path
 
 from . import chunking, embeddings, parsing, redaction, security, vector_store
 from .config import settings
+from .extraction import pipeline as extraction_pipeline
 from .legal import profile as legal_profile
 from .legal.profile import DocumentProfile
+from .store import repository as store_repository
 
 
 @dataclass
@@ -32,6 +34,8 @@ class IngestReport:
     # other side of a deal, so this is recorded per document and surfaced to
     # whoever uploaded it.
     injection: dict = field(default_factory=dict)
+    # Counts from the ingest-time extraction into the structured store.
+    extraction: dict = field(default_factory=dict)
     # Document-level legal profile: doc type, parties, jurisdiction, clause
     # inventory, defined terms, version lineage. Read back on every question
     # by the document-resolution layer, so it is computed once here rather
@@ -95,6 +99,20 @@ def ingest_file(path: str | Path) -> IngestReport:
         injection=injection.as_dict(),
     )
 
+    # Decompose into the structured store. This is what turns the corpus from
+    # something you can question into something you can query: obligation
+    # registers, renewal calendars, and portfolio risk are reads over these
+    # rows, and computing them per question would be both unusably slow and
+    # non-reproducible.
+    extraction = extraction_pipeline.extract_document(
+        filename=document,
+        chunks=chunks,
+        profile=report.profile,
+        page_count=len(pages),
+        injection_flagged=injection.flagged,
+    )
+    report.extraction = extraction.as_dict()
+
     manifest = load_manifest()
     manifest[document] = asdict(report)
     _save_manifest(manifest)
@@ -122,6 +140,7 @@ def delete_document(document: str) -> bool:
     if document not in manifest:
         return False
     vector_store.delete_document(document)
+    store_repository.delete_document(document)   # cascades to all extracted facts
     del manifest[document]
     _save_manifest(manifest)
     return True

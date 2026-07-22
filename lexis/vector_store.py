@@ -19,6 +19,7 @@ Runs embedded (on-disk) by default; set QDRANT_URL to use a server.
 from __future__ import annotations
 
 import atexit
+import re
 import warnings
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -249,6 +250,18 @@ def hybrid_search(
 
 
 def _scroll(conditions: list, limit: int, reason: str) -> list[RetrievedChunk]:
+    """Filtered fetch, returned in a STABLE, document-natural order.
+
+    Scroll order is an implementation detail of the store and is not stable
+    across processes. Downstream stages cut these lists to a budget, so an
+    unstable order means the same question can return different evidence on
+    different runs — and two lawyers at the same firm reviewing the same
+    contract get different answers. Reproducibility is not a nicety here; an
+    answer that cannot be reproduced cannot be relied on or defended.
+
+    Sorting by (document, page, clause number) also happens to be the order a
+    lawyer reads in.
+    """
     if not conditions:
         return []
     points, _ = client().scroll(
@@ -257,7 +270,19 @@ def _scroll(conditions: list, limit: int, reason: str) -> list[RetrievedChunk]:
         limit=limit,
         with_payload=True,
     )
-    return [_from_payload(p.payload or {}, reason=reason) for p in points]
+    chunks = [_from_payload(p.payload or {}, reason=reason) for p in points]
+    chunks.sort(key=lambda c: (c.document, c.page,
+                               _clause_sort_key(c.clause_number), c.text[:80]))
+    return chunks
+
+
+def _clause_sort_key(number: str | None) -> tuple:
+    """Document order for clause numbers: 2 < 10, and 11.2 < 11.10."""
+    parts: list[tuple[int, str]] = []
+    for piece in str(number or "").split("."):
+        digits = re.match(r"\d+", piece)
+        parts.append((int(digits.group(0)) if digits else 0, piece))
+    return tuple(parts)
 
 
 def expand_clause_numbers(

@@ -68,10 +68,15 @@ _PARTY_ROLE_RE = re.compile(
 )
 
 # Registered legal entities: "Acme Consulting LLC", "Foo Bar Pvt. Ltd."
+# The entity SUFFIX is matched case-insensitively while the name itself must
+# still be capitalised. Party blocks are conventionally set in full capitals —
+# "HELIOS TECHNOLOGIES PRIVATE LIMITED" — and a case-sensitive suffix silently
+# drops every party from exactly the part of the document that names them.
 _ENTITY_RE = re.compile(
     r"(?<!\w)(?P<name>(?:[A-Z][\w&.\-]*\s+){0,4}[A-Z][\w&.\-]*\s+"
-    r"(?:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Corporation|Ltd\.?|Limited|"
-    r"LLP|LP|PLC|GmbH|S\.A\.|B\.V\.|Pvt\.?\s*Ltd\.?|Private Limited))(?!\w)"
+    r"(?i:LLC|L\.L\.C\.|Inc\.?|Incorporated|Corp\.?|Corporation|Ltd\.?|Limited|"
+    r"LLP|LP|PLC|GmbH|S\.A\.|B\.V\.|N\.V\.|Pvt\.?\s*Ltd\.?|Private\s+Limited|"
+    r"Pte\.?\s*Ltd\.?|S\.p\.A\.|A/S|AB|AG))(?!\w)"
 )
 
 _AGREEMENT_RE = re.compile(

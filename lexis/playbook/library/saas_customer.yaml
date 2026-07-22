@@ -1,0 +1,208 @@
+id: saas_customer
+name: SaaS Agreement - Customer Position
+position: customer
+version: "1.0"
+applies_to: [SaaS, MSA, Reseller, Supply, ServiceOrder]
+
+# A worked example of an in-house playbook: the positions a customer-side
+# legal team typically holds when reviewing a vendor's paper. Every rule
+# carries the reason for the position, because a finding a lawyer cannot
+# argue from is a finding they will ignore.
+
+rules:
+  - id: liability-cap-exists
+    title: Liability must be capped
+    concept: limitation_of_liability
+    category: liability
+    severity: blocker
+    check: {type: cap_present}
+    rationale: >
+      Uncapped liability is unquantifiable exposure and is normally
+      uninsurable. Procurement cannot approve a contract without a ceiling.
+    ideal: >
+      Each party's total aggregate liability is limited to the fees paid in
+      the twelve (12) months preceding the event giving rise to the claim.
+    fallback:
+      - "150% of fees paid in the preceding twelve (12) months"
+      - "200% of fees paid in the preceding twelve (12) months"
+
+  - id: liability-cap-not-excessive
+    title: Our liability cap should not exceed 1x annual fees
+    concept: limitation_of_liability
+    category: liability
+    severity: high
+    check: {type: max_cap_multiplier, value: 1.0}
+    rationale: >
+      A multiple above 1x annual fees means potential loss exceeds the total
+      contract value, which inverts the commercial rationale for buying.
+    ideal: "Liability capped at the fees paid in the preceding twelve (12) months."
+    fallback:
+      - "1.5x fees, provided the vendor's indemnities remain uncapped"
+
+  - id: termination-for-convenience
+    title: We must be able to exit for convenience
+    concept: termination
+    category: termination
+    severity: high
+    # Tests for the RIGHT, not merely for a termination clause. Every
+    # agreement has termination provisions; the question is whether any of
+    # them lets us leave without having to prove the vendor did something
+    # wrong. A concept-level existence check cannot tell those apart.
+    check:
+      type: required_language
+      patterns:
+        - "terminat\\w+[^.]{0,90}for convenience"
+        - "for convenience[^.]{0,90}terminat\\w+"
+        - "terminat\\w+[^.]{0,60}(?:without cause|for any reason|at will)"
+    rationale: >
+      Without a convenience exit we are locked in for the full term regardless
+      of performance, service quality, or changes in our own requirements.
+    ideal: "Customer may terminate for convenience on thirty (30) days' written notice."
+    fallback:
+      - "Termination for convenience after the initial term on 60 days' notice"
+
+  - id: termination-notice-window
+    title: Termination notice should not exceed 90 days
+    concept: termination
+    category: termination
+    severity: medium
+    check: {type: max_days, date_kind: notice, value: 90}
+    rationale: >
+      Notice periods beyond a quarter delay migration and extend spend on a
+      service we have already decided to leave.
+    ideal: "Thirty (30) days' written notice."
+
+  - id: no-automatic-renewal
+    title: The agreement must not renew automatically
+    concept: term
+    category: commercial
+    severity: high
+    check:
+      type: forbidden_language
+      patterns:
+        - "renew(?:s|ing)? automatically"
+        - "automatic(?:ally)? renew"
+        - "shall automatically (?:renew|extend)"
+        # The evergreen formulation, which is how auto-renewal is actually
+        # drafted most of the time and never uses the word "automatically":
+        # "continues for an initial term of 36 months and thereafter renews
+        # for successive 12 month periods unless either party gives notice".
+        - "renews?\\s+for\\s+successive"
+        - "thereafter\\s+renews?"
+        - "extend(?:s|ed)?\\s+for\\s+successive"
+        - "successive\\s+(?:renewal\\s+)?(?:terms|periods)"
+        - "continue\\w*\\s+thereafter\\s+for\\s+consecutive"
+        - "consecutive\\s+periods\\s+of"
+        - "further\\s+periods?\\s+of\\s+\\w+\\s*\\(?\\d+\\)?\\s*(?:month|year)"
+    rationale: >
+      Auto-renewal transfers the diary risk to us: one missed notice date
+      commits another full term. Renewal should be a positive decision.
+    ideal: "The Agreement renews only by written agreement signed by both parties."
+    fallback:
+      - "Auto-renewal permitted with at least 90 days' advance written reminder"
+
+  - id: cure-period-required
+    title: A cure period must apply before termination for breach
+    concept: cure_period
+    category: termination
+    severity: high
+    check: {type: must_exist}
+    rationale: >
+      Without a cure right, an inadvertent or disputed breach permits
+      immediate termination of a service we depend on operationally.
+    ideal: "Thirty (30) days to cure following written notice specifying the breach."
+
+  - id: payment-terms-not-aggressive
+    title: Payment terms should be at least 30 days
+    concept: fees
+    category: financial
+    severity: medium
+    check: {type: min_days, date_kind: payment, value: 30}
+    rationale: >
+      Sub-30-day terms conflict with our standard accounts-payable cycle and
+      generate avoidable late-payment interest.
+    ideal: "Payment due within thirty (30) days of a valid invoice."
+    fallback:
+      - "Net 45 where an early-settlement discount is offered"
+
+  - id: confidentiality-required
+    title: Confidentiality obligations must be present
+    concept: confidentiality
+    category: privacy
+    severity: blocker
+    check: {type: must_exist}
+    rationale: >
+      The vendor will process our commercial and customer information.
+      Absent express obligations we rely solely on trade-secret law.
+    ideal: "Mutual confidentiality surviving termination for five (5) years."
+
+  - id: data-protection-required
+    title: Data protection terms must be present where personal data is processed
+    concept: data_protection
+    category: privacy
+    severity: blocker
+    check: {type: must_exist}
+    rationale: >
+      Controller-to-processor terms are a statutory requirement under UK/EU
+      GDPR. Their absence is a regulatory exposure, not a commercial one.
+    ideal: "Processor terms with breach notification within 72 hours."
+
+  - id: ip-ownership-of-our-data
+    title: We must retain ownership of data we upload
+    concept: intellectual_property
+    category: ip
+    severity: blocker
+    check: {type: must_exist}
+    rationale: >
+      Our data is our asset. Vendor ownership or a broad licence over it would
+      prevent exit and could permit onward commercial use.
+    ideal: "Customer retains all rights in Customer Data; vendor licence limited to providing the service."
+
+  - id: vendor-indemnity-for-ip
+    title: The vendor must indemnify us for IP infringement
+    concept: indemnification
+    category: ip
+    severity: high
+    check: {type: must_exist}
+    rationale: >
+      We cannot assess whether the vendor's platform infringes third-party
+      rights; the party that built it should carry that risk.
+    ideal: "Vendor indemnifies Customer against third-party IP infringement claims, uncapped."
+
+  - id: no-unilateral-amendment
+    title: The vendor must not be able to change terms unilaterally
+    concept: amendment
+    category: governance
+    severity: high
+    check:
+      type: forbidden_language
+      patterns:
+        - "may (?:amend|modify|change|update) (?:these|this|the) (?:terms|agreement)[^.]{0,60}(?:at any time|in its sole discretion|without notice)"
+        - "reserves the right to (?:amend|modify|change) (?:these|this|the)"
+        - "posting (?:the )?(?:revised|updated|amended) (?:terms|version)"
+    rationale: >
+      Unilateral amendment makes every other negotiated position provisional;
+      terms agreed today can be replaced tomorrow without our consent.
+    ideal: "Amendments only by written agreement signed by both parties."
+
+  - id: governing-law-present
+    title: Governing law and forum must be specified
+    concept: governing_law
+    category: regulatory
+    severity: medium
+    check: {type: must_exist}
+    rationale: >
+      Absent an express choice, a dispute begins with a conflict-of-laws
+      argument before anyone reaches the merits.
+    ideal: "Governed by the laws of England and Wales; courts of England and Wales."
+
+  - id: suspension-requires-notice
+    title: Service suspension must require prior notice
+    concept: suspension
+    category: operational
+    severity: high
+    check: {type: must_exist}
+    rationale: >
+      Suspension without notice takes a production system offline with no
+      opportunity to remedy a disputed invoice or an alleged breach.
+    ideal: "At least ten (10) business days' written notice before any suspension."

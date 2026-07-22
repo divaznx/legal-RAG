@@ -20,6 +20,89 @@ self-reported by the model.
 | UI         | Streamlit                                               |
 | CLI        | `cli.py`                                                |
 
+## The platform layer: extraction at ingest, not at query time
+
+Retrieval answers questions. A question is not a product. An obligation
+register, a renewal calendar, a portfolio risk view — "show me every renewal
+in the next 90 days", "which contracts put uncapped indemnity on us" — are
+reads over structured facts, and no vector store can serve them.
+
+So every document is decomposed **once at ingest** into a structured store
+(`lexis/store/`, SQLite; DDL kept Postgres-compatible for multi-tenant
+hosting). RAG becomes one consumer of that model rather than the whole system.
+This also removes work from the query path, where generation dominates
+latency.
+
+```
+ingest -> clauses -> obligations | key dates | money terms -> SQLite
+                                          |
+                     playbook review, calendar, registers, portfolio
+```
+
+**Extraction is deterministic**, not model-based. A register is a system of
+record that a lawyer filters, exports, and acts on, so it must be stable: the
+same contract yields the same rows every run. An LLM pass would drift, and
+"the register changed but the contract didn't" is a trust failure the product
+does not recover from. Where the rules cannot reach they extract nothing —
+visible absence rather than invisible invention.
+
+Every row carries **provenance** (document, clause, character span) and an
+`extractor_version`, so improving an extractor triggers a targeted re-run
+(`extraction.stale()`) rather than a choice between a stale corpus and
+reprocessing everything.
+
+**Deadlines are stored as rules, not dates.** "90 days before the end of the
+then-current term" has no date until the term is known, and the term moves on
+every renewal. The rule persists; resolution happens on read. Where the anchor
+is unknown the calendar says so instead of inventing a date — and only
+resolved entries reach the `.ics` export, because a placeholder reminder on an
+arbitrary day is how a real renewal gets missed.
+
+```bash
+python cli.py review SaaS_Northwind_v3.0.txt        # playbook review
+python cli.py obligations --obligor Customer        # obligation register
+python cli.py calendar --effective 2025-03-14 --ics deadlines.ics
+python cli.py portfolio                             # corpus-wide exposure
+```
+
+## Contract review is playbook-driven
+
+Risk is not a property of a clause; it is a property of a clause **relative to
+a position**. A 12-month liability cap is aggressive for a customer and
+generous for a vendor. A model asked "is this risky?" with no position supplied
+produces confident, untraceable nonsense.
+
+A playbook (`lexis/playbook/library/*.yaml`) states, per issue: what must
+exist, the ideal language, the acceptable fallbacks in order, what is a
+walk-away, and **why the firm takes that position**. That last field is what
+makes a finding arguable in a negotiation rather than merely assertive — and
+the playbook is the customer's own institutional knowledge, which is the
+product's real retention moat.
+
+Two properties make the output usable rather than plausible:
+
+- **Missing clauses are found by set difference** — the playbook's required
+  concepts minus the document's. Models are poor at noticing absence; asked
+  what a contract is missing they list clauses contracts usually have. Sets
+  are perfect at it.
+- **Thresholds are arithmetic.** "Notice must not exceed 90 days", "the cap
+  must not exceed 1x annual fees" are comparisons against numbers already
+  parsed at ingest. They cannot hallucinate and they return the same verdict
+  every run.
+
+## Reproducibility
+
+Same contract, same output, every run — a review that changes between runs on
+an unchanged contract is worse than no review, and two lawyers at one firm
+getting different answers makes the product unusable.
+
+This is enforced, not assumed. Structured lookups are returned in a stable
+document-natural order rather than store order, and concept expansion walks
+an ordered structure rather than a `set` — Python randomises string hashes per
+process, so `list(set(...))` silently made the same question probe different
+concepts, and return different evidence, on different runs. Both are covered
+by regression tests.
+
 ## The legal intelligence layer
 
 Plain semantic RAG fails on legal questions in ways that are invisible until

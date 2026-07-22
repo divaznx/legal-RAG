@@ -444,20 +444,32 @@ def expand_consequences(concepts: list[str], depth: int = 2) -> list[str]:
 
 
 def _walk(seeds: list[str], depth: int, edge: str) -> list[str]:
-    seen = {s for s in seeds if s in CONCEPTS}
-    frontier = list(seen)
-    ordered: list[str] = list(frontier)
+    # dict.fromkeys, not a set: `list(set(...))` iterates in hash order, which
+    # Python randomises per process. The walk's output order decides which
+    # concepts get a retrieval probe within MAX_CONCEPT_PROBES, so a set here
+    # makes the same question probe different concepts on different runs — and
+    # therefore return different evidence. Reproducibility is not optional in
+    # a system whose answers get relied on.
+    ordered: list[str] = list(dict.fromkeys(s for s in seeds if s in CONCEPTS))
+    seen = set(ordered)
+    frontier = list(ordered)
     for _ in range(max(depth, 0)):
+        # Neighbours are interleaved ACROSS the frontier, not appended one
+        # source at a time. The probe budget is small, so draining the first
+        # concept's neighbourhood before touching the second means a question
+        # detecting {services, survival, termination} spends every probe on
+        # things adjacent to "services" and never probes survival at all.
+        branches = [
+            [n for n in getattr(CONCEPTS[name], edge) if n in CONCEPTS and n not in seen]
+            for name in frontier if name in CONCEPTS
+        ]
         nxt: list[str] = []
-        for name in frontier:
-            concept = CONCEPTS.get(name)
-            if concept is None:
-                continue
-            for neighbour in getattr(concept, edge):
-                if neighbour in CONCEPTS and neighbour not in seen:
-                    seen.add(neighbour)
-                    nxt.append(neighbour)
-                    ordered.append(neighbour)
+        for rank in range(max((len(b) for b in branches), default=0)):
+            for branch in branches:
+                if rank < len(branch) and branch[rank] not in seen:
+                    seen.add(branch[rank])
+                    nxt.append(branch[rank])
+                    ordered.append(branch[rank])
         if not nxt:
             break
         frontier = nxt

@@ -208,7 +208,12 @@ def definition_targets(question: str, known_terms: set[str] | None = None) -> li
 
     if known:
         lowered = question.lower()
-        for term in known:
+        # sorted(): Python randomises string hashes per process, so iterating
+        # the set directly makes the ORDER of definition targets vary between
+        # runs. Downstream that order decides which definitions win the
+        # evidence budget — the same question would retrieve different
+        # definitions on different runs.
+        for term in sorted(known):
             if len(term) >= 4 and re.search(rf"(?<!\w){re.escape(term)}(?!\w)", lowered):
                 normalized.append(term)
 

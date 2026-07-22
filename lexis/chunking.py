@@ -65,6 +65,19 @@ _DOTTED_HEADING_RE = re.compile(
     r"^\s*(?P<num>\d+(?:\.\d+)+)\s*(?:[.:\-–—)]\s*)?(?P<title>[\"“”'A-Z][^\n]*)"
 )
 
+# Third-level sub-clauses in an enumerated list continue the lead-in sentence
+# and therefore start LOWERCASE:
+#     8.2  Where the Supplier fails to meet a Service Level:
+#     8.2.1  the Supplier shall pay the service credits; and
+#     8.2.2  the Supplier shall, within ten (10) Business Days, provide ...
+# Requiring a capital swallows both into 8.2, so a deadline belonging to the
+# report gets attributed to the payment sub-clause. Two dots or more is
+# required: at one dot this would also match running prose like "12.3 does not
+# apply to...", which is how sentences get filed under the wrong clause.
+_DEEP_DOTTED_HEADING_RE = re.compile(
+    r"^\s*(?P<num>\d+(?:\.\d+){2,})\s*(?:[.:\-–—)]\s*)?(?P<title>\S[^\n]*)"
+)
+
 # "4. TERMINATION" on a line of its own. Constrained to a whole short line so
 # that "30. days after notice" or a numbered list item in running prose cannot
 # be mistaken for a clause heading.
@@ -118,11 +131,12 @@ def parse_heading(paragraph: str) -> Heading | None:
                        raw_number=m.group("num").strip(), title=_clean_title(after),
                        raw=line.strip())
 
-    m = _DOTTED_HEADING_RE.match(line)
-    if m:
-        return Heading(kind="section", number=normalize_clause_number(m.group("num")),
-                       raw_number=m.group("num").strip(),
-                       title=_clean_title(m.group("title")), raw=line.strip())
+    for pattern in (_DOTTED_HEADING_RE, _DEEP_DOTTED_HEADING_RE):
+        m = pattern.match(line)
+        if m:
+            return Heading(kind="section", number=normalize_clause_number(m.group("num")),
+                           raw_number=m.group("num").strip(),
+                           title=_clean_title(m.group("title")), raw=line.strip())
 
     m = _BARE_HEADING_RE.match(line)
     if m:
@@ -192,6 +206,7 @@ class Chunk:
     xref_labels: list[str] = field(default_factory=list)
     incorporates: list[str] = field(default_factory=list)       # binding attachments
     concepts: list[str] = field(default_factory=list)
+    concepts_all: list[str] = field(default_factory=list)
     is_definition: bool = False
     # text that addresses the AI system rather than stating contractual terms
     is_suspect: bool = False
@@ -221,6 +236,7 @@ class Chunk:
             "xref_labels": self.xref_labels,
             "incorporates": self.incorporates,
             "concepts": self.concepts,
+            "concepts_all": self.concepts_all,
             "is_definition": self.is_definition,
             "is_suspect": self.is_suspect,
         }
@@ -309,7 +325,11 @@ def _sectionize(page_text: str) -> list[_Section]:
                 parent = current_article
                 if heading.kind == "article":
                     current_article = heading.display
-                    current_top = None
+                    # An Article is also the parent for its own sub-numbering,
+                    # so 31.1 under "ARTICLE 31" cites as "Article 31.1".
+                    # Clearing this made it cite as "Section 31.1", sending a
+                    # reader to a part of the document that does not exist.
+                    current_top = heading
                     parent = None
                 elif "." not in heading.number:
                     current_top = heading
@@ -339,13 +359,23 @@ def _analyze(text: str) -> dict:
     """Legal structure of a chunk's text, indexed for retrieval."""
     found = legal_definitions.extract_definitions(text)
     refs = xref.extract(text)
+    concepts = ontology.detect_concepts(text)
     return {
         "defined_terms": [d.key for d in found],
         "defined_term_labels": [d.term for d in found],
         "xrefs": list(dict.fromkeys(r.key() for r in refs)),
         "xref_labels": list(dict.fromkeys(r.label for r in refs)),
         "incorporates": xref.incorporated_attachments(text),
-        "concepts": ontology.detect_concepts(text)[:8],
+        # Two consumers, two needs. RETRIEVAL wants the few dominant concepts:
+        # a long tail dilutes the concept-probe buckets and costs recall.
+        # COVERAGE (the playbook engine, deciding whether a document addresses
+        # an issue at all) needs the full list — a clause granting a suspension
+        # right behind seven other concepts would fall off a short list and be
+        # reported as a missing clause, a false finding of exactly the kind
+        # that costs a reviewer's trust. Coupling them makes one of the two
+        # wrong, so they are stored separately.
+        "concepts": concepts[:8],
+        "concepts_all": concepts[:24],
         "is_definition": bool(found) or legal_definitions.is_definitional(text),
         "is_suspect": security.is_suspect(text),
     }
@@ -388,6 +418,7 @@ def chunk_pages(pages: list[Page], document: str, version: str) -> list[Chunk]:
                 xref_labels=analysis["xref_labels"],
                 incorporates=analysis["incorporates"],
                 concepts=analysis["concepts"],
+                concepts_all=analysis["concepts_all"],
                 is_definition=analysis["is_definition"] or is_definitions_section,
                 is_suspect=analysis["is_suspect"],
             )
