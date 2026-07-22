@@ -22,6 +22,13 @@ def cmd_ingest(paths: list[str]) -> None:
               f"{report.pages} page(s), {report.chunks} chunk(s), redactions: {redactions}")
         if report.low_ocr_pages:
             print(f"     warning: possible scanned pages (low OCR confidence): {report.low_ocr_pages}")
+        if report.injection.get("flagged"):
+            print(f"     SECURITY WARNING: {len(report.injection['findings'])} passage(s) attempt "
+                  f"to instruct the AI system ({', '.join(report.injection['categories'])}).")
+            for finding in report.injection["findings"][:3]:
+                print(f"       - \"{finding['excerpt']}\"")
+            print("     The document was indexed; this text is treated as content, never "
+                  "as instructions. Review it before relying on answers from this document.")
 
 
 def cmd_ask(question: str) -> None:

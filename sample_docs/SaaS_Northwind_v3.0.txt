@@ -1,0 +1,174 @@
+SOFTWARE AS A SERVICE AGREEMENT
+
+This Software as a Service Agreement ("Agreement") is entered into between
+Northwind Technologies Ltd ("Supplier") and the undersigned customer
+("Customer").
+
+Client: Priya Raghunathan
+Client ID: NW-88213
+Contact email: p.raghunathan@northwind-example.co.uk
+Effective Date: 14 March 2025
+
+Clause 1. Definitions and Interpretation
+1.1 "Authorised User" means an individual employee or contractor of the
+Customer who has been issued credentials to access the Platform.
+1.2 "Confidential Information" means any information disclosed by one party
+to the other that is marked confidential or would reasonably be understood to
+be confidential, but excludes information that is or becomes public through
+no breach of this Agreement.
+1.3 "Platform" means the hosted software service described in Schedule 1.
+1.4 "Personal Data" has the meaning given in the UK GDPR.
+1.5 "Service Credit" means the credit calculated in accordance with Schedule 2
+and applied against future Subscription Fees.
+1.6 "Subscription Fees" means the recurring charges set out in Schedule 3.
+1.7 Headings are for convenience only and do not affect interpretation.
+
+Clause 2. Grant of Access
+2.1 Subject to Clause 3 and the Customer's payment of the Subscription Fees,
+the Supplier grants the Customer a non-exclusive, non-transferable right to
+permit Authorised Users to access the Platform during the Term.
+2.2 The Customer shall not sublicense, resell, or provide access to the
+Platform to any third party except as expressly permitted in Clause 14.
+
+Clause 3. Customer Obligations
+3.1 The Customer shall ensure that all Authorised Users comply with the
+acceptable use policy set out in Schedule 4, which is incorporated by
+reference into this Agreement.
+3.2 The Customer shall not attempt to reverse engineer, decompile, or derive
+the source code of the Platform.
+3.3 Breach of Clause 3.2 constitutes a material breach that is not capable of
+cure for the purposes of Clause 11.
+
+Clause 4. Subscription Fees and Payment
+4.1 The Customer shall pay Subscription Fees of GBP 96,000 per annum, invoiced
+annually in advance and payable within thirty (30) days of the invoice date.
+4.2 Overdue amounts accrue interest at four percent (4%) per annum above the
+Bank of England base rate, accruing daily from the due date until payment.
+4.3 The Supplier may suspend access to the Platform under Clause 10 if any
+undisputed invoice remains unpaid for more than forty-five (45) days.
+4.4 All amounts are exclusive of VAT, which the Customer shall pay in addition
+at the applicable rate.
+
+Clause 5. Service Levels
+5.1 The Supplier shall provide the Platform with a monthly uptime of at least
+99.5%, measured in accordance with Schedule 2.
+5.2 If uptime falls below the level in Clause 5.1, the Customer's sole
+financial remedy is the Service Credit, save that this Clause 5.2 does not
+limit the Customer's termination right under Clause 11.4.
+
+Clause 6. Confidentiality
+6.1 Each party shall keep the other party's Confidential Information secret
+and shall not disclose it except to those of its personnel who need to know it
+for the purposes of this Agreement.
+6.2 The obligations in Clause 6.1 continue for five (5) years after
+termination or expiry of this Agreement.
+6.3 Nothing in this Clause 6 prevents disclosure required by law or by a
+competent regulatory authority, provided the disclosing party gives prompt
+written notice where lawful to do so.
+
+Clause 7. Data Protection
+7.1 The Supplier processes Personal Data as processor and the Customer acts as
+controller. The parties shall comply with the data processing terms set out in
+Schedule 5.
+7.2 The Supplier shall notify the Customer without undue delay, and in any
+event within seventy-two (72) hours, of becoming aware of a personal data
+breach affecting the Customer's Personal Data.
+7.3 The Supplier shall not transfer Personal Data outside the United Kingdom
+without the Customer's prior written consent.
+
+Clause 8. Intellectual Property
+8.1 All intellectual property rights in the Platform remain vested in the
+Supplier. Nothing in this Agreement transfers ownership of those rights.
+8.2 The Customer retains all intellectual property rights in data it uploads
+to the Platform and grants the Supplier a licence to process that data solely
+to provide the Platform.
+8.3 The Supplier shall indemnify the Customer against third party claims that
+the Platform infringes a UK patent or copyright, subject to Clause 12 and to
+the Customer notifying the Supplier promptly of any such claim.
+
+Clause 9. Warranties
+9.1 The Supplier warrants that it will provide the Platform with reasonable
+skill and care.
+9.2 Except as expressly stated in this Agreement, all warranties, conditions,
+and terms implied by statute or common law are excluded to the fullest extent
+permitted by law.
+
+Clause 10. Suspension
+10.1 The Supplier may suspend access to the Platform where required under
+Clause 4.3, or where continued access presents a material security risk.
+10.2 The Supplier shall give the Customer at least five (5) business days'
+written notice before suspending access under Clause 10.1, except where an
+immediate suspension is necessary to prevent harm.
+
+Clause 11. Term and Termination
+11.1 This Agreement commences on the Effective Date and continues for an
+initial term of thirty-six (36) months (the "Initial Term"), and thereafter
+renews for successive twelve (12) month periods unless either party gives not
+less than ninety (90) days' written notice before the end of the then-current
+term.
+11.2 Either party may terminate this Agreement immediately by written notice
+if the other party commits a material breach which is capable of cure and
+fails to cure it within thirty (30) days of written notice specifying the
+breach.
+11.3 Either party may terminate this Agreement immediately by written notice
+if the other party becomes insolvent, enters administration, or has a receiver
+appointed over any of its assets.
+11.4 The Customer may terminate this Agreement on thirty (30) days' written
+notice if monthly uptime falls below 99.5% in any three (3) consecutive
+months.
+11.5 On termination the Customer shall pay all Subscription Fees accrued up to
+the effective date of termination, and the Supplier shall make the Customer's
+data available for export for thirty (30) days.
+
+Clause 12. Limitation of Liability
+12.1 Nothing in this Agreement limits either party's liability for death or
+personal injury caused by negligence, for fraud, or for any liability that
+cannot lawfully be limited.
+12.2 Subject to Clause 12.1, neither party is liable for loss of profit, loss
+of business, loss of anticipated savings, or any indirect or consequential
+loss.
+12.3 Subject to Clauses 12.1 and 12.2, each party's total aggregate liability
+arising under this Agreement is limited to one hundred and fifty percent
+(150%) of the Subscription Fees paid in the twelve (12) months preceding the
+event giving rise to the claim.
+12.4 The limit in Clause 12.3 does not apply to the Customer's obligation to
+pay Subscription Fees, or to the Supplier's indemnity under Clause 8.3.
+
+Clause 13. Force Majeure
+13.1 Neither party is liable for failure to perform caused by an event beyond
+its reasonable control, provided it notifies the other party promptly and uses
+reasonable endeavours to mitigate the effect.
+13.2 If a force majeure event continues for more than sixty (60) days, either
+party may terminate this Agreement on written notice without liability.
+
+Clause 14. Assignment and Subcontracting
+14.1 Neither party may assign this Agreement without the other party's prior
+written consent, such consent not to be unreasonably withheld.
+14.2 Either party may assign this Agreement to an affiliate or to a purchaser
+of substantially all of its assets on written notice.
+14.3 The Supplier may subcontract performance but remains responsible for its
+subcontractors' acts and omissions.
+
+Clause 15. Survival
+15.1 Clauses 1, 6, 8, 12, 15, 16, and 17 survive termination or expiry of this
+Agreement, together with any provision expressed to survive.
+
+Clause 16. Governing Law
+16.1 This Agreement and any dispute arising out of it are governed by the laws
+of England and Wales.
+
+Clause 17. Dispute Resolution
+17.1 The parties shall first attempt to resolve any dispute by escalation to
+their respective senior executives within fifteen (15) business days.
+17.2 If the dispute is not resolved under Clause 17.1, it shall be finally
+resolved by arbitration under the LCIA Rules, seated in London, before a sole
+arbitrator.
+17.3 Nothing in this Clause 17 prevents either party from seeking injunctive
+relief from the courts of England and Wales in respect of a breach of
+Clause 6 or Clause 8.
+
+Clause 18. Entire Agreement
+18.1 This Agreement, together with Schedules 1 to 5, constitutes the entire
+agreement between the parties and supersedes all prior discussions.
+18.2 In the event of a conflict between this Agreement and a Schedule, the
+terms of this Agreement prevail.

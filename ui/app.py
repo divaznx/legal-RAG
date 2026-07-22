@@ -71,6 +71,17 @@ with st.sidebar:
         st.success(f"{report.document}: {report.chunks} chunks, redactions: {redactions}")
         if report.low_ocr_pages:
             st.warning(f"Possible scanned pages (low OCR confidence): {report.low_ocr_pages}")
+        if report.injection.get("flagged"):
+            st.error(
+                f"**Security warning — {name}**: "
+                f"{len(report.injection['findings'])} passage(s) attempt to instruct the AI "
+                f"system rather than state contractual terms "
+                f"({', '.join(report.injection['categories'])}). The document was indexed and "
+                f"this text is treated as content, never as instructions — but review it "
+                f"before relying on answers from this document."
+            )
+            for finding in report.injection["findings"][:3]:
+                st.caption(f"› {finding['excerpt']}")
 
     # …and files removed from the uploader are deleted from the vector store.
     for name in st.session_state.session_uploads - current:
@@ -146,14 +157,41 @@ if question:
         for limitation in result.limitations:
             st.warning(limitation)
 
+        legal = result.legal or {}
+        if legal:
+            with st.expander("Legal reasoning (how this answer was scoped)"):
+                st.markdown(
+                    f"**Question type:** {legal.get('intent', '?').replace('_', ' ')} "
+                    f"(confidence {legal.get('intent_confidence', 0)})"
+                )
+                st.markdown(
+                    f"**Answering from:** {', '.join(legal.get('documents') or ['—'])}  \n"
+                    f"{legal.get('document_reason', '')}"
+                )
+                if legal.get("superseded"):
+                    st.markdown(f"**Excluded as superseded:** {', '.join(legal['superseded'])}")
+                if legal.get("clause_targets"):
+                    st.markdown(f"**Clause(s) referenced:** {', '.join(legal['clause_targets'])}")
+                if legal.get("definition_targets"):
+                    st.markdown(f"**Defined terms:** {', '.join(legal['definition_targets'])}")
+                if legal.get("concepts"):
+                    st.markdown(f"**Legal concepts:** {', '.join(legal['concepts'])}")
+                if legal.get("expanded_concepts"):
+                    st.markdown(
+                        "**Expanded to (legal chain):** "
+                        + ", ".join(c.replace("_", " ") for c in legal["expanded_concepts"])
+                    )
+
         with st.expander(f"Retrieved evidence ({len(result.chunks)} chunks)"):
             for i, chunk in enumerate(result.chunks, start=1):
                 rr = f" · rerank {chunk.rerank_score:.2f}" if chunk.rerank_score is not None else ""
+                parent = f" · under {chunk.parent_section}" if chunk.parent_section else ""
                 st.markdown(
                     f"**[Chunk {i}]** `{chunk.document}` · Page {chunk.page} · "
-                    f"{chunk.section or '—'} · v{chunk.version} · "
+                    f"{chunk.section or '—'}{parent} · v{chunk.version} · "
                     f"OCR {chunk.ocr_source} ({chunk.ocr_confidence:.2f}) · fused {chunk.score:.3f}{rr}"
                 )
+                st.caption(f"Why retrieved: {chunk.retrieval_reason}")
                 st.text(chunk.text[:1200])
 
     st.session_state.history.append(

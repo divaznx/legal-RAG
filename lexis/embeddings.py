@@ -41,6 +41,14 @@ def embed_query(text: str) -> list[float]:
     return next(iter(_dense().query_embed(text))).tolist()
 
 
+def embed_queries(texts: list[str]) -> list[list[float]]:
+    """Batch form for multi-probe retrieval — the legal planner issues one
+    probe per expanded concept, and batching keeps that a single ONNX call."""
+    if not texts:
+        return []
+    return [v.tolist() for v in _dense().query_embed(texts)]
+
+
 def _to_sparse_vector(embedding) -> qm.SparseVector:
     return qm.SparseVector(indices=embedding.indices.tolist(), values=embedding.values.tolist())
 

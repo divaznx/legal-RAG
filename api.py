@@ -49,6 +49,11 @@ def _serialize(result: engine.AskResult) -> dict:
         "confidence": result.confidence,
         "limitations": result.limitations,
         "cached": result.cached,
+        "needs_clarification": result.needs_clarification,
+        # Full trace of the legal intelligence layer: resolved document and
+        # why, intent, entities, concept expansion, sub-queries. Exposed so a
+        # reviewer can audit the scope of an answer without re-running it.
+        "legal": result.legal,
         "timings_ms": result.timings_ms,
         "citation_verification": {
             "passed": result.citations.passed,
@@ -75,10 +80,20 @@ async def upload_document(file: UploadFile) -> dict:
     name = Path(file.filename or "upload").name
     if not name.lower().endswith(SUPPORTED_EXTENSIONS):
         raise HTTPException(415, f"Unsupported file type; supported: {', '.join(SUPPORTED_EXTENSIONS)}")
+    payload = await file.read()
+    if len(payload) > settings.max_upload_bytes:
+        raise HTTPException(
+            413,
+            f"File is {len(payload) // (1024 * 1024)} MB; the limit is "
+            f"{settings.max_upload_bytes // (1024 * 1024)} MB.",
+        )
+    if not payload:
+        raise HTTPException(422, "Uploaded file is empty.")
+
     uploads = settings.data_path / "uploads"
     uploads.mkdir(parents=True, exist_ok=True)
     dest = uploads / name
-    dest.write_bytes(await file.read())
+    dest.write_bytes(payload)
     try:
         report = ingest.ingest_file(dest)
     except ValueError as exc:

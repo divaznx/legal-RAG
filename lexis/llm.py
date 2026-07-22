@@ -33,13 +33,23 @@ def llm_available() -> bool:
         return False
 
 
-def stream_answer(question: str, chunks: list[RetrievedChunk]):
+def stream_answer(
+    question: str,
+    chunks: list[RetrievedChunk],
+    plan=None,
+    notes: list[str] | None = None,
+):
     """Yield answer text deltas as the model produces them.
 
     Streaming is the single biggest perceived-latency lever (~75% reduction
     in time-to-first-content). The system prompt is byte-identical across
     requests, so a kept-alive Ollama model reuses its KV-cache prefix and
     prefill only pays for the retrieved chunks + question.
+
+    `plan` and `notes` carry the legal retrieval layer's findings (resolved
+    document, superseded versions, unretrieved cross-references) into the
+    user turn — never into the system prompt, which must stay byte-identical
+    for the KV-cache prefix to be reused.
     """
     stream = client().chat.completions.create(
         model=settings.ollama_model,
@@ -49,7 +59,7 @@ def stream_answer(question: str, chunks: list[RetrievedChunk]):
         extra_body={"keep_alive": settings.llm_keep_alive},
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_message(question, chunks)},
+            {"role": "user", "content": user_message(question, chunks, plan, notes)},
         ],
     )
     for event in stream:
@@ -57,8 +67,9 @@ def stream_answer(question: str, chunks: list[RetrievedChunk]):
             yield event.choices[0].delta.content
 
 
-def generate_answer(question: str, chunks: list[RetrievedChunk]) -> str:
-    return "".join(stream_answer(question, chunks)).strip()
+def generate_answer(question: str, chunks: list[RetrievedChunk], plan=None,
+                    notes: list[str] | None = None) -> str:
+    return "".join(stream_answer(question, chunks, plan, notes)).strip()
 
 
 def warm() -> None:

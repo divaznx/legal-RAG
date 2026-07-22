@@ -9,12 +9,14 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import chunking, embeddings, parsing, redaction, vector_store
+from . import chunking, embeddings, parsing, redaction, security, vector_store
 from .config import settings
+from .legal import profile as legal_profile
+from .legal.profile import DocumentProfile
 
 
 @dataclass
@@ -26,6 +28,15 @@ class IngestReport:
     redactions: dict[str, int]
     low_ocr_pages: list[int]
     ingested_at: str
+    # Adversarial-content scan. Legal documents routinely arrive from the
+    # other side of a deal, so this is recorded per document and surfaced to
+    # whoever uploaded it.
+    injection: dict = field(default_factory=dict)
+    # Document-level legal profile: doc type, parties, jurisdiction, clause
+    # inventory, defined terms, version lineage. Read back on every question
+    # by the document-resolution layer, so it is computed once here rather
+    # than re-derived per query.
+    profile: dict = field(default_factory=dict)
 
 
 def _manifest_path() -> Path:
@@ -49,6 +60,10 @@ def ingest_file(path: str | Path) -> IngestReport:
     version = parsing.detect_version(document)
 
     pages = parsing.parse(path)
+
+    # Scan the raw text before redaction rewrites it, so an injection hidden
+    # inside a value that redaction would replace is still seen.
+    injection = security.scan("\n\n".join(p.text for p in pages))
 
     redaction_counts: Counter = Counter()
     for page in pages:
@@ -76,12 +91,30 @@ def ingest_file(path: str | Path) -> IngestReport:
         redactions=dict(redaction_counts),
         low_ocr_pages=[p.number for p in pages if p.ocr_confidence < 0.5],
         ingested_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        profile=legal_profile.build(chunks, document=document, version=version).as_dict(),
+        injection=injection.as_dict(),
     )
 
     manifest = load_manifest()
     manifest[document] = asdict(report)
     _save_manifest(manifest)
     return report
+
+
+def load_profiles() -> list[DocumentProfile]:
+    """Legal profiles of every ingested document.
+
+    Documents ingested before the profile layer existed have no stored
+    profile; they are skipped rather than half-built, so resolution never
+    reasons from an empty clause inventory (which would let it wrongly
+    conclude that a referenced clause does not exist).
+    """
+    profiles: list[DocumentProfile] = []
+    for entry in load_manifest().values():
+        data = entry.get("profile")
+        if data:
+            profiles.append(legal_profile.from_dict(data))
+    return profiles
 
 
 def delete_document(document: str) -> bool:

@@ -1,17 +1,26 @@
-"""The answering engine: cache -> hybrid retrieve -> rerank -> stream -> verify.
+"""The answering engine.
 
-Latency design (the production legal-RAG playbook):
+    cache -> plan (resolve document, classify intent, expand concepts)
+          -> legal retrieval -> stream -> verify
+
+Pipeline (the legal-RAG playbook):
 - semantic answer cache short-circuits repeated questions in milliseconds
-- hybrid (BM25 + dense) retrieval fans out to candidate_k, fused with RRF
-- a cross-encoder reranks candidates down to final_k — fewer chunks means a
-  smaller prompt and faster LLM prefill
+- the legal intelligence layer resolves WHICH agreement and WHAT KIND of
+  legal answer before any vector search happens
+- retrieval fans out across concept probes, exact clause lookups, definitions
+  and cross-references, then reranks and assembles under per-role budgets
 - the answer streams token-by-token; citation verification runs on the
   completed text
 - every stage is timed; timings ride along on the result
 
-Confidence is computed here, mechanically, from reranker scores, OCR
-quality of the evidence, and the citation-verification verdict — never from
-the model's self-assessment.
+Two paths deliberately never reach the LLM: an ambiguous target document, and
+a question citing a clause no ingested agreement contains. In both cases
+generating anything at all would be worse than answering the question that
+was actually asked.
+
+Confidence is computed here, mechanically, from the calibrated dense signal,
+OCR quality of the evidence, and the citation-verification verdict — never
+from the model's self-assessment.
 """
 
 from __future__ import annotations
@@ -21,10 +30,17 @@ from dataclasses import asdict, dataclass, field
 from time import perf_counter
 from typing import Iterator
 
-from . import cache, embeddings, llm, rerank, vector_store
+from . import cache, embeddings, ingest, llm, rerank, retrieval, security, vector_store
 from .config import settings
+from .legal import planner
+from .legal.planner import QueryPlan
 from .llm import CitationReport
-from .prompts import REFUSAL
+from .prompts import (
+    REFUSAL,
+    clarification_answer,
+    finalize_answer,
+    missing_clause_answer,
+)
 from .vector_store import RetrievedChunk
 
 
@@ -38,6 +54,9 @@ class AskResult:
     limitations: list[str] = field(default_factory=list)
     timings_ms: dict[str, float] = field(default_factory=dict)
     cached: bool = False
+    # legal intelligence trace — auditable in the API/UI
+    legal: dict = field(default_factory=dict)
+    needs_clarification: bool = False
 
     @property
     def refused(self) -> bool:
@@ -77,15 +96,39 @@ def _boost_fact_chunks(question: str, chunks: list[RetrievedChunk]) -> list[Retr
                 chunk.rerank_score = max(chunk.rerank_score or 0.0, 0.99)
                 chunk.boosted = True
                 break
-    return sorted(chunks, key=lambda c: (c.rerank_score if c.rerank_score is not None else c.score), reverse=True)
+    return chunks
 
 
-def _system_limitations(chunks: list[RetrievedChunk], citations: CitationReport) -> list[str]:
-    limitations: list[str] = []
+def _system_limitations(
+    chunks: list[RetrievedChunk],
+    citations: CitationReport,
+    plan: QueryPlan | None = None,
+    notes: list[str] | None = None,
+) -> list[str]:
+    limitations: list[str] = list(notes or [])
+    suspect = sorted({f"{c.document} {c.section or '-'}" for c in chunks if c.is_suspect})
+    if suspect:
+        limitations.append(
+            "Evidence includes text that attempts to instruct the AI system rather "
+            f"than state contractual terms ({', '.join(suspect)}). It was treated as "
+            "document content only; review that passage manually."
+        )
     low_ocr = sorted({(c.document, c.page) for c in chunks if c.ocr_confidence < 0.5})
     if low_ocr:
         pages = ", ".join(f"{d} p.{p}" for d, p in low_ocr)
         limitations.append(f"Low OCR confidence (possible scans): {pages}.")
+    if plan is not None and plan.resolution.superseded:
+        limitations.append(
+            "Superseded version(s) excluded from the evidence: "
+            + ", ".join(plan.resolution.superseded) + "."
+        )
+    documents = {c.document for c in chunks}
+    if len(documents) > 1:
+        limitations.append(
+            "Evidence spans multiple documents ("
+            + ", ".join(sorted(documents))
+            + "); each statement is attributed to its own agreement."
+        )
     if citations.fabricated:
         limitations.append(
             f"{len(citations.fabricated)} citation(s) did not match any retrieved chunk "
@@ -93,19 +136,22 @@ def _system_limitations(chunks: list[RetrievedChunk], citations: CitationReport)
         )
     if citations.uncited_answer and not citations.refusal:
         limitations.append("The answer contains no verifiable citations.")
-    return limitations
+    return list(dict.fromkeys(limitations))
 
 
-def _confidence(chunks: list[RetrievedChunk], citations: CitationReport) -> str:
+def _confidence(
+    chunks: list[RetrievedChunk],
+    citations: CitationReport,
+    best_dense: float,
+) -> str:
     """Computed from the calibrated dense signal + evidence quality —
     reranker scores are ordering-only and deliberately excluded."""
     if not chunks or not citations.passed or citations.refusal:
         return "Low"
-    top_dense = max(c.dense_score for c in chunks)
     min_ocr = min(c.ocr_confidence for c in chunks)
-    if top_dense >= 0.6 and min_ocr >= 0.5 and citations.verified == citations.total:
+    if best_dense >= 0.6 and min_ocr >= 0.5 and citations.verified == citations.total:
         return "High"
-    if top_dense >= settings.min_dense_score:
+    if best_dense >= settings.min_dense_score:
         return "Medium"
     return "Low"
 
@@ -117,6 +163,7 @@ def _cache_payload(result: AskResult) -> dict:
         "citations": asdict(result.citations),
         "confidence": result.confidence,
         "limitations": result.limitations,
+        "legal": result.legal,
     }
 
 
@@ -128,7 +175,66 @@ def _from_cache_entry(question: str, entry: dict) -> AskResult:
         citations=CitationReport(**entry.get("citations", {})),
         confidence=entry.get("confidence", "Low"),
         limitations=entry.get("limitations", []),
+        legal=entry.get("legal", {}),
         cached=True,
+    )
+
+
+def _plain_retrieve(question: str) -> tuple[list[RetrievedChunk], float]:
+    """Legacy single-query path, used when legal_intelligence is disabled."""
+    query_dense = embeddings.embed_query(question)
+    query_sparse = embeddings.embed_query_sparse(question)
+    candidates = vector_store.hybrid_search(query_dense, query_sparse)
+    best_dense = max((c.dense_score for c in candidates), default=0.0)
+    reranked = _boost_fact_chunks(question, rerank.rerank_chunks(question, candidates))
+    reranked.sort(key=lambda c: (c.rerank_score if c.rerank_score is not None else c.score),
+                  reverse=True)
+    return reranked[: settings.final_k], best_dense
+
+
+def _short_circuit(question: str, answer: str, plan: QueryPlan, timer: _Timer,
+                   limitations: list[str]) -> AskResult:
+    return AskResult(
+        question=question,
+        answer=answer,
+        citations=CitationReport(refusal=True),
+        confidence="Low" if plan.resolution.needs_clarification else "High",
+        limitations=limitations,
+        timings_ms=timer.done(),
+        legal=plan.explain(),
+        needs_clarification=plan.resolution.needs_clarification,
+    )
+
+
+def _validate(question: str) -> str | None:
+    """Reject input that cannot produce a meaningful answer.
+
+    Without this an empty question reaches document resolution, matches every
+    agreement equally, and comes back as a clarification request listing the
+    corpus — so a stray Enter in the client's UI looks like a considered
+    response. An unbounded question is also a cost and latency vector: it is
+    embedded, expanded into the sparse query, and prepended to every prompt.
+    """
+    stripped = question.strip()
+    if not stripped:
+        return "Please enter a question."
+    if len(stripped) < settings.min_question_chars:
+        return (f"That question is too short to answer reliably "
+                f"(minimum {settings.min_question_chars} characters).")
+    if len(stripped) > settings.max_question_chars:
+        return (f"That question is too long ({len(stripped)} characters; "
+                f"maximum {settings.max_question_chars}). Ask it in parts.")
+    return None
+
+
+def _rejected(question: str, message: str, timer: _Timer) -> AskResult:
+    return AskResult(
+        question=question,
+        answer=f"## Answer\n{message}\n",
+        citations=CitationReport(refusal=True),
+        confidence="Low",
+        limitations=[message],
+        timings_ms=timer.done(),
     )
 
 
@@ -136,10 +242,35 @@ def ask_stream(question: str) -> Iterator[tuple[str, object]]:
     """Yield ("delta", text) fragments as they stream, then ("result", AskResult)."""
     timer = _Timer()
 
+    problem = _validate(question)
+    if problem is not None:
+        result = _rejected(question, problem, timer)
+        yield ("delta", result.answer)
+        yield ("result", result)
+        return
+
     query_dense = embeddings.embed_query(question)
     timer.mark("embed_query")
 
-    hit = cache.lookup(question, query_dense)
+    plan: QueryPlan | None = None
+    notes: list[str] = []
+
+    if settings.legal_intelligence:
+        plan = planner.plan(
+            question,
+            ingest.load_profiles(),
+            allow_clarification=settings.allow_clarification,
+        )
+        timer.mark("legal_planning")
+
+    # Cache lookup happens AFTER planning so the key can include the resolved
+    # agreement. A question-embedding-only key is document-blind: two
+    # near-identical questions that resolve to different contracts would share
+    # a cache entry, and a cached answer would be served from the wrong
+    # agreement — reintroducing, through the cache, exactly the failure the
+    # resolution layer exists to prevent.
+    scope = plan.resolution.documents if plan else None
+    hit = cache.lookup(question, query_dense, scope)
     if hit is not None:
         result = _from_cache_entry(question, hit)
         result.timings_ms = timer.done()
@@ -148,19 +279,41 @@ def ask_stream(question: str) -> Iterator[tuple[str, object]]:
         return
     timer.mark("cache_lookup")
 
-    query_sparse = embeddings.embed_query_sparse(question)
-    candidates = vector_store.hybrid_search(query_dense, query_sparse)
-    timer.mark("hybrid_retrieve")
+    if plan is not None:
+        # Ambiguous target agreement -> ask, never guess.
+        if plan.resolution.needs_clarification:
+            result = _short_circuit(
+                question, clarification_answer(plan.resolution), plan, timer,
+                [f"{plan.resolution.reason} Clarification requested instead of answering."],
+            )
+            yield ("delta", result.answer)
+            yield ("result", result)
+            return
 
-    # Refusal gate: the calibrated dense signal decides whether the corpus
-    # is even in-domain for this question. The reranker below only orders.
-    in_domain = any(c.dense_score >= settings.min_dense_score for c in candidates)
+        # A cited clause that exists nowhere in the corpus is a factual answer,
+        # not a retrieval problem.
+        if plan.resolution.missing_clause:
+            result = _short_circuit(
+                question, missing_clause_answer(plan.resolution, question), plan, timer,
+                [plan.resolution.reason],
+            )
+            yield ("delta", result.answer)
+            yield ("result", result)
+            return
 
-    reranked = _boost_fact_chunks(question, rerank.rerank_chunks(question, candidates))
-    chunks = reranked[: settings.final_k]
-    timer.mark("rerank")
+        evidence = retrieval.retrieve(plan)
+        chunks = _boost_fact_chunks(question, evidence.chunks)
+        best_dense = evidence.primary_best_dense
+        notes = evidence.notes
+        timer.mark("legal_retrieve")
+    else:
+        chunks, best_dense = _plain_retrieve(question)
+        timer.mark("retrieve")
 
-    if not chunks or not in_domain:
+    # Refusal gate: the calibrated dense signal of the PRIMARY query decides
+    # whether the corpus is in-domain. Concept probes are intentionally broad
+    # and never vote here.
+    if not chunks or best_dense < settings.min_dense_score:
         result = AskResult(
             question=question,
             answer=REFUSAL,
@@ -169,30 +322,53 @@ def ask_stream(question: str) -> Iterator[tuple[str, object]]:
             limitations=["No retrieved chunk was semantically relevant to the question "
                          f"(best dense score below {settings.min_dense_score})."],
             timings_ms=timer.done(),
+            legal=plan.explain() if plan else {},
         )
         yield ("delta", result.answer)
         yield ("result", result)
         return
 
     parts: list[str] = []
-    for delta in llm.stream_answer(question, chunks):
+    for delta in llm.stream_answer(question, chunks, plan, notes):
         parts.append(delta)
         yield ("delta", delta)
     answer = "".join(parts).strip()
     timer.mark("generate")
 
+    # Remove any attacker-specified string the model was induced to emit, and
+    # treat compliance as a compromised answer rather than a cosmetic issue:
+    # if an injection reached the output at all, nothing else in it is
+    # trustworthy enough to carry a confidence above Low.
+    answer, injected = security.strip_injected_output(
+        answer, [c.text for c in chunks if c.is_suspect]
+    )
+
     citations = llm.verify_citations(answer, chunks)
+    confidence = _confidence(chunks, citations, best_dense)
+    limitations = _system_limitations(chunks, citations, plan, notes)
+    if injected:
+        confidence = "Low"
+        limitations.insert(0, (
+            "A passage in the source documents instructed the model to emit specific "
+            f"text, and it complied. The inserted text ({', '.join(repr(i) for i in injected)}) "
+            "was removed automatically. Treat this answer as unverified and review the "
+            "source document."
+        ))
+
     result = AskResult(
         question=question,
-        answer=answer,
+        # The stored/displayed answer carries the SYSTEM's confidence and
+        # limitations, never the model's own account of them.
+        answer=finalize_answer(answer, limitations, confidence),
         chunks=chunks,
         citations=citations,
-        confidence=_confidence(chunks, citations),
-        limitations=_system_limitations(chunks, citations),
+        confidence=confidence,
+        limitations=limitations,
         timings_ms=timer.done(),
+        legal=plan.explain() if plan else {},
     )
     if citations.passed and not result.refused:
-        cache.store(question, query_dense, _cache_payload(result))
+        cache.store(question, query_dense, _cache_payload(result), scope)
     yield ("result", result)
 
 

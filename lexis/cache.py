@@ -54,15 +54,34 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def lookup(question: str, query_embedding: list[float]) -> dict | None:
+def _scope_key(documents: list[str] | None) -> str:
+    """The agreements an answer was built from.
+
+    Part of the cache key, because semantic similarity alone is
+    document-blind: two questions can sit within the similarity threshold of
+    each other and still target different contracts. Serving one's answer for
+    the other would blend agreements through the cache — the exact failure the
+    document-resolution layer exists to prevent, arriving by a side door.
+    """
+    return "|".join(sorted(documents or []))
+
+
+def lookup(
+    question: str,
+    query_embedding: list[float],
+    documents: list[str] | None = None,
+) -> dict | None:
     if not settings.cache_enabled:
         return None
     fingerprint = corpus_fingerprint()
+    scope = _scope_key(documents)
     normalized = " ".join(question.lower().split())
     best: dict | None = None
     best_sim = 0.0
     for entry in _load():
         if entry.get("fingerprint") != fingerprint:
+            continue
+        if entry.get("scope", "") != scope:
             continue
         if entry.get("normalized_question") == normalized:
             return entry  # exact hit
@@ -72,7 +91,12 @@ def lookup(question: str, query_embedding: list[float]) -> dict | None:
     return best
 
 
-def store(question: str, query_embedding: list[float], result_payload: dict) -> None:
+def store(
+    question: str,
+    query_embedding: list[float],
+    result_payload: dict,
+    documents: list[str] | None = None,
+) -> None:
     if not settings.cache_enabled:
         return
     fingerprint = corpus_fingerprint()
@@ -80,6 +104,7 @@ def store(question: str, query_embedding: list[float], result_payload: dict) -> 
     entries.append(
         {
             "fingerprint": fingerprint,
+            "scope": _scope_key(documents),
             "question": question,
             "normalized_question": " ".join(question.lower().split()),
             "embedding": query_embedding,
