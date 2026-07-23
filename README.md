@@ -247,8 +247,38 @@ uvicorn api:app --reload --port 8000
 # POST /documents (multipart upload) · GET /documents · DELETE /documents/{name} · POST /ask
 ```
 
+**Open WebUI** (chat frontend):
+
+The API also speaks the OpenAI protocol (`GET /v1/models`,
+`POST /v1/chat/completions` with streaming), so any OpenAI-compatible chat
+frontend can use Lexis as a model. With the API running on port 8000:
+
+```powershell
+.\run_openwebui.ps1
+```
+
+The script launches Open WebUI via [uv](https://docs.astral.sh/uv) (no
+Docker needed; the first run downloads ~1 GB into uv's cache) and points it
+at `http://localhost:8000/v1`. Open http://localhost:3000 and chat with the
+`lexis` model — every turn runs the full RAG pipeline (planning, hybrid
+retrieval, rerank, citation verification) and the answer ends with the
+system verdict footer (confidence · citations verified · cache status).
+
+Notes:
+- The engine is **single-turn**: each message is answered independently
+  from the ingested documents; earlier chat turns are not context.
+- Ingest documents through the Lexis API/CLI (`POST /documents` or
+  `python cli.py ingest ...`), **not** through Open WebUI's own file upload —
+  Open WebUI's built-in RAG is bypassed entirely.
+- Open WebUI's meta prompts (chat title/tag generation) are detected and
+  routed straight to the underlying LLM, skipping the RAG pipeline.
+- Already have Open WebUI or Docker? Just add an OpenAI connection with
+  base URL `http://localhost:8000/v1` (from a container:
+  `http://host.docker.internal:8000/v1`) and any API key.
+
 ⚠️ Embedded Qdrant is single-process: run the CLI, the API, **or** the UI at
-a time — or set `QDRANT_URL` to a real Qdrant server to share it.
+a time — or set `QDRANT_URL` to a real Qdrant server to share it. (Open WebUI
+is fine alongside the API — it talks to it over HTTP.)
 
 ## Answer anatomy
 

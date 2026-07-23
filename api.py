@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import threading
+import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
@@ -129,5 +131,157 @@ def ask_stream(request: AskRequest) -> StreamingResponse:
                 yield f"event: delta\ndata: {json.dumps(payload)}\n\n"
             else:
                 yield f"event: result\ndata: {json.dumps(_serialize(payload))}\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+# --------------------------------------------------------------------------
+# OpenAI-compatible surface, so chat frontends (Open WebUI, LibreChat, ...)
+# can use Lexis as a "model": point them at http://localhost:8000/v1 with any
+# API key. Each chat turn runs the full RAG pipeline on the latest user
+# message (the engine is single-turn by design — prior turns are ignored),
+# and the verified metadata is appended to the answer as a footer.
+# --------------------------------------------------------------------------
+
+OPENAI_MODEL_ID = "lexis"
+
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str | list | None = None
+
+
+class ChatCompletionRequest(BaseModel):
+    messages: list[ChatMessage]
+    model: str = OPENAI_MODEL_ID
+    stream: bool = False
+
+
+def _message_text(message: ChatMessage) -> str:
+    if isinstance(message.content, str):
+        return message.content
+    if isinstance(message.content, list):  # multimodal part list
+        return " ".join(
+            p.get("text", "") for p in message.content if isinstance(p, dict) and p.get("type") == "text"
+        )
+    return ""
+
+
+def _last_user_message(messages: list[ChatMessage]) -> str:
+    for message in reversed(messages):
+        if message.role == "user":
+            return _message_text(message).strip()
+    return ""
+
+
+def _verification_footer(result: engine.AskResult) -> str:
+    cv = result.citations
+    verdict = "VERIFIED" if cv.passed else "UNVERIFIED"
+    parts = [f"Confidence: {result.confidence}", f"Citations: {cv.verified}/{cv.total} {verdict}"]
+    if result.cached:
+        parts.append("cached")
+    footer = f"\n\n---\n`{' · '.join(parts)}`"
+    for limitation in result.limitations:
+        footer += f"\n- {limitation}"
+    return footer
+
+
+def _chunk_payload(completion_id: str, created: int, *, delta: dict, finish: str | None = None) -> str:
+    payload = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "created": created,
+        "model": OPENAI_MODEL_ID,
+        "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+    }
+    return f"data: {json.dumps(payload)}\n\n"
+
+
+def _is_meta_task(question: str) -> bool:
+    # Open WebUI generates titles/tags/follow-ups by sending "### Task:"
+    # prompts to the same model; those must not go through the RAG pipeline.
+    return question.lstrip().startswith("### Task:")
+
+
+def _passthrough(request: ChatCompletionRequest, completion_id: str, created: int):
+    """Answer a frontend meta task (title/tag generation) with the raw LLM."""
+    messages = [{"role": m.role, "content": _message_text(m)} for m in request.messages]
+    text = (
+        llm.client()
+        .chat.completions.create(
+            model=settings.ollama_model,
+            temperature=0.0,
+            max_tokens=200,
+            messages=messages,
+        )
+        .choices[0]
+        .message.content
+        or ""
+    )
+    if not request.stream:
+        return _completion_response(completion_id, created, text)
+
+    def events():
+        yield _chunk_payload(completion_id, created, delta={"role": "assistant", "content": text})
+        yield _chunk_payload(completion_id, created, delta={}, finish="stop")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(events(), media_type="text/event-stream")
+
+
+def _completion_response(completion_id: str, created: int, text: str) -> dict:
+    return {
+        "id": completion_id,
+        "object": "chat.completion",
+        "created": created,
+        "model": OPENAI_MODEL_ID,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
+@app.get("/v1/models")
+def openai_models() -> dict:
+    return {
+        "object": "list",
+        "data": [
+            {"id": OPENAI_MODEL_ID, "object": "model", "created": 0, "owned_by": "lexis"}
+        ],
+    }
+
+
+@app.post("/v1/chat/completions")
+def openai_chat_completions(request: ChatCompletionRequest):
+    _require_llm()
+    completion_id = f"chatcmpl-{uuid.uuid4().hex}"
+    created = int(time.time())
+
+    question = _last_user_message(request.messages)
+    if not question:
+        raise HTTPException(422, "No user message found in `messages`.")
+    if _is_meta_task(question):
+        return _passthrough(request, completion_id, created)
+
+    if not request.stream:
+        result = engine.ask(question)
+        return _completion_response(completion_id, created, result.answer + _verification_footer(result))
+
+    def events():
+        yield _chunk_payload(completion_id, created, delta={"role": "assistant", "content": ""})
+        for kind, payload in engine.ask_stream(question):
+            if kind == "delta":
+                yield _chunk_payload(completion_id, created, delta={"content": payload})
+            else:
+                yield _chunk_payload(
+                    completion_id, created, delta={"content": _verification_footer(payload)}
+                )
+        yield _chunk_payload(completion_id, created, delta={}, finish="stop")
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(events(), media_type="text/event-stream")
