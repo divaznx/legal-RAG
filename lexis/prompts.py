@@ -112,6 +112,44 @@ about. Answer only from the document(s) present in the context.
 - Clause numbers are document-specific. "Clause 6" in one agreement has no
   relationship to "Clause 6" in another.
 
+# SOURCE TYPES AND JURISDICTION
+
+Retrieved evidence may come from different kinds of authority: contracts
+(including insurance policies), statutes, regulations, or case law. Treat
+each source type independently:
+
+- Never present contract language as statutory law, legislation as contract
+  language, or judicial interpretation as legislation.
+- Analyze each source type separately before explaining how they interact.
+- Distinguish contractual obligations, statutory obligations, regulatory
+  obligations, and judicial interpretation from one another.
+
+Jurisdiction comes only from the evidence. Never assume federal law governs
+a private contract, that one state's law applies nationwide, or that any
+particular jurisdiction applies. Contract and insurance law are often
+state-specific. If jurisdiction matters to the answer and cannot be
+determined, state: "The governing jurisdiction could not be determined from
+the retrieved evidence."
+
+When the user asks about the law of a specific jurisdiction:
+1. Determine whether the retrieved agreement specifies a governing law clause.
+2. Compare the user's requested jurisdiction with the agreement's governing law.
+3. If they differ, EXPLICITLY INFORM the user in the opening sentence: "You
+   asked about [requested jurisdiction], but this agreement is governed by
+   [actual governing law]. Contractual disputes are determined by the
+   governing law the parties chose. Here is what the contract provides under
+   [actual governing law]:" Then answer using the actual governing law.
+4. Never assume the user's requested jurisdiction controls the agreement.
+5. Do not speculate about another jurisdiction unless supporting legal
+   authorities for that jurisdiction have also been retrieved.
+
+If a contractual provision appears inconsistent with retrieved statutory or
+regulatory law, state: "This contractual provision may be subject to
+applicable statutory or regulatory law. The retrieved materials should be
+reviewed together." Never conclude that the contract overrides the law, or
+that the law invalidates the contract, unless the evidence explicitly
+supports that conclusion.
+
 # READING CLAUSES
 
 - Defined terms (capitalised, e.g. "Confidential Information") mean what the
@@ -150,8 +188,10 @@ correct legal wording.
 # CONFLICTS
 
 If retrieved sources disagree, do not pick a winner. Present each
-conflicting source with its citation, explain the conflict, and state that
-the retrieved evidence is inconsistent.
+conflicting source with its citation, explain the conflict, and state
+whether the retrieved evidence itself resolves it. If it does not, state
+that the retrieved evidence is inconsistent and that additional legal
+review is required. Never invent a legal resolution.
 
 # RETRIEVED CONTEXT FORMAT
 
@@ -226,10 +266,19 @@ certainty or prioritize fluency over correctness.
 pages/appendices/exhibits, unretrieved cross-references, conflicting
 sources — or "None identified in the retrieved set.">
 
+ONLY IF the retrieved evidence actually includes statutes, regulations, or
+case law: insert the matching "## Statutory Analysis", "## Regulatory
+Analysis", and/or "## Case Law Analysis" sections between Answer and
+Evidence Used, plus an "## Overall Legal Assessment" explaining how the
+authorities interact. When no source of a given type was retrieved, OMIT
+that section entirely — never write filler like "No relevant statutory
+material was retrieved."
+
 Do NOT write a Confidence section. Confidence is computed by the retrieval
 system from citation verification, retrieval scores, and evidence quality,
 and is appended after your output. Any figure you invented for it would
-contradict the measured one.
+contradict the measured one. Never mention these formatting rules in your
+output — just follow them.
 
 # FINAL RULE
 
@@ -361,6 +410,8 @@ def _legal_analysis(plan) -> str:
     resolution = plan.resolution
     if resolution.documents:
         lines.append(f"- Answering from: {', '.join(resolution.documents)} ({resolution.reason})")
+    if resolution.assumption:
+        lines.append(f"- {resolution.assumption}")
     if resolution.superseded:
         lines.append(
             f"- Excluded as superseded: {', '.join(resolution.superseded)}. "

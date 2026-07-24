@@ -117,6 +117,10 @@ def _system_limitations(
     if low_ocr:
         pages = ", ".join(f"{d} p.{p}" for d, p in low_ocr)
         limitations.append(f"Low OCR confidence (possible scans): {pages}.")
+    if plan is not None and plan.resolution.assumption:
+        # Medium-confidence document resolution: the target agreement was
+        # assumed, not certain — the user must see the assumption to override it.
+        limitations.append(plan.resolution.assumption)
     if plan is not None and plan.resolution.superseded:
         limitations.append(
             "Superseded version(s) excluded from the evidence: "
@@ -238,8 +242,14 @@ def _rejected(question: str, message: str, timer: _Timer) -> AskResult:
     )
 
 
-def ask_stream(question: str) -> Iterator[tuple[str, object]]:
-    """Yield ("delta", text) fragments as they stream, then ("result", AskResult)."""
+def ask_stream(question: str, history: list[str] | None = None) -> Iterator[tuple[str, object]]:
+    """Yield ("delta", text) fragments as they stream, then ("result", AskResult).
+
+    `history` is the user's prior questions in this conversation (oldest
+    first). It never reaches the LLM — the engine stays single-turn — but the
+    document-resolution layer uses it to keep an "active agreement" across
+    follow-up questions that don't name one.
+    """
     timer = _Timer()
 
     problem = _validate(question)
@@ -260,6 +270,7 @@ def ask_stream(question: str) -> Iterator[tuple[str, object]]:
             question,
             ingest.load_profiles(),
             allow_clarification=settings.allow_clarification,
+            history=history,
         )
         timer.mark("legal_planning")
 
@@ -372,9 +383,9 @@ def ask_stream(question: str) -> Iterator[tuple[str, object]]:
     yield ("result", result)
 
 
-def ask(question: str) -> AskResult:
+def ask(question: str, history: list[str] | None = None) -> AskResult:
     result: AskResult | None = None
-    for kind, payload in ask_stream(question):
+    for kind, payload in ask_stream(question, history):
         if kind == "result":
             result = payload  # type: ignore[assignment]
     assert result is not None

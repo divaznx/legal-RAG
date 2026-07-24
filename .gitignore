@@ -4,4 +4,6 @@ __pycache__/
 .env
 data/
 .streamlit/
+qdrant_server/
+.webui_secret_key
 .webui_secret_key

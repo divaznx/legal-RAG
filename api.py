@@ -41,6 +41,10 @@ app = FastAPI(title="Lexis Enterprise", version="0.2.0", lifespan=lifespan)
 
 class AskRequest(BaseModel):
     question: str
+    # Prior user questions in this conversation, oldest first. Optional: used
+    # only by document resolution to keep the "active agreement" across
+    # follow-ups; it never reaches the LLM.
+    history: list[str] | None = None
 
 
 def _serialize(result: engine.AskResult) -> dict:
@@ -118,7 +122,7 @@ def _require_llm() -> None:
 @app.post("/ask")
 def ask(request: AskRequest) -> dict:
     _require_llm()
-    return _serialize(engine.ask(request.question))
+    return _serialize(engine.ask(request.question, request.history))
 
 
 @app.post("/ask/stream")
@@ -126,7 +130,7 @@ def ask_stream(request: AskRequest) -> StreamingResponse:
     _require_llm()
 
     def events():
-        for kind, payload in engine.ask_stream(request.question):
+        for kind, payload in engine.ask_stream(request.question, request.history):
             if kind == "delta":
                 yield f"event: delta\ndata: {json.dumps(payload)}\n\n"
             else:
@@ -139,8 +143,9 @@ def ask_stream(request: AskRequest) -> StreamingResponse:
 # OpenAI-compatible surface, so chat frontends (Open WebUI, LibreChat, ...)
 # can use Lexis as a "model": point them at http://localhost:8000/v1 with any
 # API key. Each chat turn runs the full RAG pipeline on the latest user
-# message (the engine is single-turn by design — prior turns are ignored),
-# and the verified metadata is appended to the answer as a footer.
+# message; prior user turns are passed to document resolution only (active
+# agreement memory) and never reach the LLM. The verified metadata is
+# appended to the answer as a footer.
 # --------------------------------------------------------------------------
 
 OPENAI_MODEL_ID = "lexis"
@@ -172,6 +177,14 @@ def _last_user_message(messages: list[ChatMessage]) -> str:
         if message.role == "user":
             return _message_text(message).strip()
     return ""
+
+
+def _prior_user_messages(messages: list[ChatMessage]) -> list[str]:
+    """User turns before the latest one — the resolution layer's conversation
+    context. Capped to the most recent few: the active agreement is whatever
+    was discussed recently, not in a 50-turn-old question."""
+    prior = [_message_text(m).strip() for m in messages if m.role == "user"]
+    return [q for q in prior[:-1] if q][-6:]
 
 
 def _verification_footer(result: engine.AskResult) -> str:
@@ -268,13 +281,15 @@ def openai_chat_completions(request: ChatCompletionRequest):
     if _is_meta_task(question):
         return _passthrough(request, completion_id, created)
 
+    history = _prior_user_messages(request.messages)
+
     if not request.stream:
-        result = engine.ask(question)
+        result = engine.ask(question, history)
         return _completion_response(completion_id, created, result.answer + _verification_footer(result))
 
     def events():
         yield _chunk_payload(completion_id, created, delta={"role": "assistant", "content": ""})
-        for kind, payload in engine.ask_stream(question):
+        for kind, payload in engine.ask_stream(question, history):
             if kind == "delta":
                 yield _chunk_payload(completion_id, created, delta={"content": payload})
             else:

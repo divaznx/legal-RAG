@@ -276,9 +276,22 @@ Notes:
   base URL `http://localhost:8000/v1` (from a container:
   `http://host.docker.internal:8000/v1`) and any API key.
 
-⚠️ Embedded Qdrant is single-process: run the CLI, the API, **or** the UI at
-a time — or set `QDRANT_URL` to a real Qdrant server to share it. (Open WebUI
-is fine alongside the API — it talks to it over HTTP.)
+**Qdrant server** (run everything at once):
+
+The embedded Qdrant store is single-process — with it, only one of
+CLI / API / Streamlit UI can run at a time. This repo ships the standalone
+Qdrant server binary (`qdrant_server\qdrant.exe`, official v1.18.3 release)
+so they can all share one store instead:
+
+```powershell
+.\run_qdrant.ps1
+```
+
+With `QDRANT_URL=http://localhost:6333` set in `.env` (already configured),
+every Lexis process talks to the server and runs concurrently. Comment
+`QDRANT_URL` out to fall back to the embedded store — and then the
+one-process rule applies again. (Open WebUI never touches the store — it
+talks to the API over HTTP either way.)
 
 ## Answer anatomy
 

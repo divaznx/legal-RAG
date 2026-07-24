@@ -134,9 +134,15 @@ if question:
             st.stop()
 
         holder: dict = {}
+        # Prior user questions give document resolution its "active agreement"
+        # memory; they never reach the LLM. The current question is already
+        # appended to the history above, so exclude it.
+        prior_questions = [
+            e["content"] for e in st.session_state.history if e["role"] == "user"
+        ][:-1][-6:]
 
         def _deltas():
-            for kind, payload in engine.ask_stream(question):
+            for kind, payload in engine.ask_stream(question, prior_questions):
                 if kind == "delta":
                     yield payload
                 else:

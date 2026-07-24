@@ -75,6 +75,11 @@ class QueryPlan:
             "intent_signals": self.intent.matched,
             "documents": self.resolution.documents,
             "document_reason": self.resolution.reason,
+            "document_confidence": self.resolution.confidence,
+            "document_assumption": self.resolution.assumption,
+            # Negative evidence: why each competing document was ruled out.
+            "document_rejected": self.resolution.rejected,
+            "document_signals": self.resolution.signals,
             "superseded": self.resolution.superseded,
             "concepts": self.concepts,
             "expanded_concepts": [c for c in self.expanded_concepts if c not in self.concepts],
@@ -100,10 +105,12 @@ def plan(
     question: str,
     profiles: list[DocumentProfile],
     allow_clarification: bool = True,
+    history: list[str] | None = None,
 ) -> QueryPlan:
     intent = intent_mod.classify(question)
     resolved = resolution.resolve(question, profiles, intent,
-                                  allow_clarification=allow_clarification)
+                                  allow_clarification=allow_clarification,
+                                  history=history)
     entities = entities_mod.extract(question)
     policy = intent.policy
 

@@ -299,6 +299,35 @@ def test_missing_clause_is_reported_not_guessed():
     assert not r.needs_clarification
 
 
+def test_document_resolution_tolerates_misspellings():
+    # "mastre servces agreement" — fuzzy alias matching must still land on
+    # the MSA; users should never need the exact name, let alone the filename.
+    q = "What is the notice period in the mastre servces agreement?"
+    r = resolve(q, _profiles(), classify(q))
+    assert r.documents == ["MSA_Acme_v2.1.txt"]
+
+
+def test_negative_evidence_is_recorded():
+    q = "What is the term of the NDA?"
+    r = resolve(q, _profiles(), classify(q))
+    assert r.documents == ["NDA_test_v1.2.docx"]
+    # the MSA was ruled out for a stated reason, not silently dropped
+    assert "different agreement type" in r.rejected["MSA_Acme_v2.1.txt"]
+
+
+def test_conversation_context_keeps_the_active_agreement():
+    q = "And how long is the cure period?"
+    r = resolve(q, _profiles(), classify(q),
+                history=["What is the termination notice period in the Acme MSA?"])
+    assert r.documents == ["MSA_Acme_v2.1.txt"]
+    assert r.confidence == "Medium" and r.assumption
+    # but an explicit mention in the new question overrides the active agreement
+    q2 = "And what does the NDA say about that?"
+    r2 = resolve(q2, _profiles(), classify(q2),
+                 history=["What is the termination notice period in the Acme MSA?"])
+    assert r2.documents == ["NDA_test_v1.2.docx"]
+
+
 # --------------------------------------------------------------------------
 # Trust surface: adversarial documents, answer/system agreement, cache scope
 # --------------------------------------------------------------------------
