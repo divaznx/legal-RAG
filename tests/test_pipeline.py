@@ -305,6 +305,15 @@ def test_document_resolution_tolerates_misspellings():
     q = "What is the notice period in the mastre servces agreement?"
     r = resolve(q, _profiles(), classify(q))
     assert r.documents == ["MSA_Acme_v2.1.txt"]
+    # possessives must not defeat fuzzy party matching ("Nothwind's" ~ Northwind)
+    from lexis.legal.profile import DocumentProfile
+    profs = _profiles() + [DocumentProfile(
+        document="SaaS_NW_v3.0.txt", version="3.0", family="saas:saas_nw",
+        doc_type="SaaS", doc_type_label="Software as a Service Agreement",
+        organizations=["Northwind Technologies"], clause_numbers=["17"])]
+    q2 = "What are Nothwind's obligations?"
+    r2 = resolve(q2, profs, classify(q2))
+    assert r2.documents == ["SaaS_NW_v3.0.txt"]
 
 
 def test_negative_evidence_is_recorded():
@@ -313,6 +322,42 @@ def test_negative_evidence_is_recorded():
     assert r.documents == ["NDA_test_v1.2.docx"]
     # the MSA was ruled out for a stated reason, not silently dropped
     assert "different agreement type" in r.rejected["MSA_Acme_v2.1.txt"]
+
+
+def test_confidence_requires_independent_signals():
+    from lexis.legal.profile import DocumentProfile
+    profs = _profiles() + [DocumentProfile(
+        document="SaaS_NW_v3.0.txt", version="3.0", family="saas:saas_nw",
+        doc_type="SaaS", doc_type_label="Software as a Service Agreement",
+        organizations=["Northwind Technologies"], clause_numbers=["17"],
+        defined_terms=["Subscription Fees"])]
+    # one inferred signal (a defined term) -> proceed, but Medium, assumption stated
+    q = "Are the Subscription Fees refundable?"
+    r = resolve(q, profs, classify(q))
+    assert r.documents == ["SaaS_NW_v3.0.txt"]
+    assert r.confidence == "Medium" and "Subscription Fees".lower() in r.assumption.lower()
+    # two independent signals agreeing (party + defined term) -> High
+    q2 = "Are Northwind's Subscription Fees refundable?"
+    r2 = resolve(q2, profs, classify(q2))
+    assert r2.documents == ["SaaS_NW_v3.0.txt"]
+    assert r2.confidence == "High"
+
+
+def test_resolution_audit_record_is_deterministic():
+    h = ["What is the termination notice period in the Acme MSA?"]
+    q = "And how long is the cure period?"
+    r = resolve(q, _profiles(), classify(q), history=h)
+    audit = r.audit
+    assert audit["selected"] == ["MSA_Acme_v2.1.txt"]
+    assert audit["history_influenced"] is True
+    assert audit["active_agreement_before"]  # the MSA was already active
+    assert audit["clarification_required"] is False
+    assert audit["rejected_candidates"]
+    assert audit["elapsed_ms"] >= 0
+    # identical inputs -> identical record, apart from measured time
+    again = resolve(q, _profiles(), classify(q), history=h).audit
+    audit.pop("elapsed_ms"); again.pop("elapsed_ms")
+    assert audit == again
 
 
 def test_conversation_context_keeps_the_active_agreement():

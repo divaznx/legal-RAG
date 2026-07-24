@@ -80,6 +80,9 @@ class QueryPlan:
             # Negative evidence: why each competing document was ruled out.
             "document_rejected": self.resolution.rejected,
             "document_signals": self.resolution.signals,
+            # Full structured audit record (Resolution Audit Policy) — for
+            # debugging, evaluation, and regression testing, not for display.
+            "document_audit": self.resolution.audit,
             "superseded": self.resolution.superseded,
             "concepts": self.concepts,
             "expanded_concepts": [c for c in self.expanded_concepts if c not in self.concepts],

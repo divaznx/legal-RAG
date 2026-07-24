@@ -38,6 +38,7 @@ import re
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
+from time import perf_counter
 
 from . import entities, ontology
 from .intent import IntentResult
@@ -73,6 +74,10 @@ class DocumentResolution:
     assumption: str = ""             # user-visible, set only at Medium confidence
     signals: dict = field(default_factory=dict)
     rejected: dict = field(default_factory=dict)   # document -> why it was ruled out
+    # Structured audit record (Resolution Audit Policy): built by resolve()
+    # for debugging, evaluation, and regression testing. Deterministic for
+    # identical inputs except the measured elapsed_ms.
+    audit: dict = field(default_factory=dict)
 
     @property
     def resolved(self) -> bool:
@@ -105,7 +110,10 @@ def _describe(p: DocumentProfile, latest_in_family: bool) -> str:
 
 
 def _question_words(question: str) -> list[str]:
-    return re.findall(r"[a-z0-9][\w&'-]*", question.lower())
+    # Possessives stripped ("Northwind's" -> "northwind") so fuzzy matching
+    # compares names, not names-plus-apostrophe-s.
+    words = re.findall(r"[a-z0-9][\w&'’-]*", question.lower())
+    return [re.sub(r"[’']s$", "", w) for w in words]
 
 
 def _fuzzy_contains(form: str, question_words: list[str]) -> bool:
@@ -247,6 +255,21 @@ def _latest_per_family(profiles: list[DocumentProfile]) -> dict[str, DocumentPro
     return latest
 
 
+def _context_documents(history: list[str], profiles: list[DocumentProfile]) -> list[str]:
+    """The document(s) the conversation has most recently been about.
+
+    Most recent mention wins, which is also how user corrections are
+    remembered: after "no, I meant the NDA", that turn is the newest mention,
+    so every later follow-up sticks to the NDA."""
+    for prior in reversed(history):
+        hits = set(_filename_mentions(prior, profiles)) | _org_mentions(prior, profiles)
+        prior_types = _doc_type_mentions(prior, profiles)
+        hits |= {p.document for p in profiles if p.doc_type in prior_types}
+        if hits:
+            return sorted(hits)
+    return []
+
+
 def resolve(
     question: str,
     profiles: list[DocumentProfile],
@@ -254,13 +277,43 @@ def resolve(
     allow_clarification: bool = True,
     history: list[str] | None = None,
 ) -> DocumentResolution:
-    """Pick the agreement(s) this question is about.
+    """Pick the agreement(s) this question is about, with an audit record.
 
     `history` is the user's prior questions in this conversation, oldest
     first. It is the weakest signal: consulted only when the current question
     itself identifies no agreement, so an explicit mention always overrides
     the active agreement.
+
+    Every call attaches a structured audit record (selection, confidence,
+    supporting and negative evidence, active agreement before/after, whether
+    history influenced the decision, elapsed time). All fields are
+    deterministic for identical inputs except elapsed_ms, which is measured.
     """
+    start = perf_counter()
+    active_before = _context_documents(history or [], profiles)
+    resolution = _resolve(question, profiles, intent, allow_clarification, history)
+    resolution.audit = {
+        "selected": list(resolution.documents),
+        "confidence": resolution.confidence,
+        "supporting_signals": resolution.signals,
+        "rejected_candidates": resolution.rejected,
+        "active_agreement_before": active_before,
+        "active_agreement_after": (list(resolution.documents) if resolution.resolved
+                                   else active_before),
+        "clarification_required": resolution.needs_clarification,
+        "history_influenced": "conversation" in resolution.signals,
+        "elapsed_ms": round((perf_counter() - start) * 1000, 2),
+    }
+    return resolution
+
+
+def _resolve(
+    question: str,
+    profiles: list[DocumentProfile],
+    intent: IntentResult | None = None,
+    allow_clarification: bool = True,
+    history: list[str] | None = None,
+) -> DocumentResolution:
     if not profiles:
         return DocumentResolution(reason="No documents have been ingested.")
 
@@ -300,9 +353,15 @@ def resolve(
     if types:
         signals["doc_type"] = sorted(types)
         labels = ", ".join(sorted(types))
-        narrow([p for p in pool if p.doc_type in types],
-               lambda p: f"different agreement type ({p.doc_type_label}); "
-                         f"the question refers to: {labels}")
+        keep = [p for p in pool if p.doc_type in types]
+        if keep:
+            narrow(keep,
+                   lambda p: f"different agreement type ({p.doc_type_label}); "
+                             f"the question refers to: {labels}")
+        else:
+            signals.setdefault("conflicts", []).append(
+                f"the agreement type named in the question ({labels}) matches "
+                "none of the remaining candidates")
 
     # 3. Party / organisation.
     orgs = _org_mentions(question, pool)
@@ -310,9 +369,27 @@ def resolve(
         signals["organization"] = sorted(orgs)
         narrow([p for p in pool if p.document in orgs],
                lambda p: "none of its parties are named in the question")
+    elif len(pool) < len(profiles):
+        # A named party pointing OUTSIDE the current candidates is conflicting
+        # evidence ("Clause 4 of the NDA between Acme..." when the NDA has no
+        # Acme). Recorded so calibration can lower confidence.
+        stray = _org_mentions(question, [p for p in profiles if p not in pool])
+        if stray:
+            signals.setdefault("conflicts", []).append(
+                "a party named in the question belongs to a different agreement "
+                f"({', '.join(sorted(stray))})")
 
     # 4. Defined terms — "Subscription Fees" often names exactly one agreement.
-    term_hits = _defined_term_matches(question, pool)
+    # Discrimination is judged against the WHOLE corpus, not the already-
+    # narrowed pool: a term unique corpus-wide stays corroborating evidence
+    # even after another signal has singled the document out.
+    in_pool = {p.document for p in pool}
+    term_hits_all = _defined_term_matches(question, profiles)
+    term_hits = {d: t for d, t in term_hits_all.items() if d in in_pool}
+    if not term_hits and term_hits_all:
+        signals.setdefault("conflicts", []).append(
+            "the question uses defined term(s) that exist only in agreements "
+            f"already ruled out ({', '.join(sorted(term_hits_all))})")
     if term_hits:
         best = max(len(terms) for terms in term_hits.values())
         keep = {doc for doc, terms in term_hits.items() if len(terms) == best}
@@ -336,6 +413,15 @@ def resolve(
         elif with_inventory:
             # Every candidate has a clause inventory and none contains it.
             missing_clause = label
+            elsewhere = sorted(
+                p.document for p in profiles
+                if p not in pool and wanted & set(p.clause_numbers)
+            )
+            if elsewhere:
+                signals["clause_elsewhere"] = elsewhere
+                signals.setdefault("conflicts", []).append(
+                    f"{label} exists only in {', '.join(elsewhere)}, not in "
+                    "the agreement the question points at")
 
     # 6. Version lineage.
     explicit_version = _EXPLICIT_VERSION_RE.search(question)
@@ -343,16 +429,25 @@ def resolve(
         wanted_version = explicit_version.group(1)
         signals["version"] = wanted_version
         exact = [p for p in pool if p.version == wanted_version]
-        narrow(exact, lambda p: f"different version (v{p.version}); "
-                                f"the question asks about v{wanted_version}")
+        if exact:
+            narrow(exact, lambda p: f"different version (v{p.version}); "
+                                    f"the question asks about v{wanted_version}")
+        else:
+            signals.setdefault("conflicts", []).append(
+                f"requested version v{wanted_version} does not exist among "
+                "the candidates")
     wants_latest = bool(_LATEST_RE.search(question))
     wants_oldest = bool(_OLDEST_RE.search(question))
 
     if missing_clause:
+        elsewhere = signals.get("clause_elsewhere", [])
+        reason = f"No candidate agreement contains {missing_clause}."
+        if elsewhere:
+            reason += f" It exists in {', '.join(elsewhere)}."
         return DocumentResolution(
             documents=[p.document for p in pool],
-            reason=f"No ingested agreement contains {missing_clause}.",
-            confidence="High",
+            reason=reason,
+            confidence="High" if not elsewhere else "Medium",
             missing_clause=missing_clause,
             options=[_describe(p, False) for p in pool],
             signals=signals, rejected=rejected,
@@ -387,28 +482,30 @@ def resolve(
     if (history and not multi_ok
             and len({p.family for p in pool}) > 1
             and not (doc_signal_keys & signals.keys())):
-        for prior in reversed(history):
-            hits = set(_filename_mentions(prior, pool)) | _org_mentions(prior, pool)
-            prior_types = _doc_type_mentions(prior, pool)
-            hits |= {p.document for p in pool if p.doc_type in prior_types}
-            if hits:
-                signals["conversation"] = sorted(hits)
-                narrow([p for p in pool if p.document in hits],
-                       lambda p: "not the agreement the conversation has been about")
-                context_note = (
-                    f"Assumed the question continues about the "
-                    f"{pool[0].doc_type_label} ({pool[0].document}) discussed "
-                    "earlier in this conversation. Name another agreement to "
-                    "switch."
-                )
-                break
+        hits = _context_documents(history, pool)
+        if hits:
+            signals["conversation"] = hits
+            narrow([p for p in pool if p.document in hits],
+                   lambda p: "not the agreement the conversation has been about")
+            # Name the agreement by its label only — which version of it
+            # governs is decided downstream, and naming a file here could
+            # name a superseded one.
+            labels = sorted({p.doc_type_label for p in pool})
+            context_note = (
+                f"Assumed the question continues about the "
+                f"{' and the '.join(labels)} discussed earlier in this "
+                "conversation. Name another agreement to switch."
+            )
 
     if len(pool) == 1:
+        chosen = pool[0]
+        confidence, assumption = _calibrate(chosen, signals, context_note,
+                                            sole=len(profiles) == 1)
         return DocumentResolution(
-            documents=[pool[0].document],
-            reason=f"Only {pool[0].document} matches the question's signals.",
-            confidence="Medium" if context_note else ("High" if signals else "Medium"),
-            assumption=context_note,
+            documents=[chosen.document],
+            reason=f"Only {chosen.document} matches the question's signals.",
+            confidence=confidence,
+            assumption=assumption,
             signals=signals, rejected=rejected,
         )
 
@@ -432,13 +529,17 @@ def resolve(
                 if not wants_oldest else
                 f"later version (v{p.version}); the question asks about the earliest",
             )
+        confidence, assumption = _calibrate(
+            chosen, signals, context_note,
+            sole=families == {p.family for p in profiles},
+        )
         return DocumentResolution(
             documents=[chosen.document],
             reason=(f"{'Earliest' if wants_oldest else 'Latest'} version of this "
                     f"agreement (v{chosen.version}); "
                     f"{len(rest)} other version(s) excluded."),
-            confidence="Medium" if context_note else "High",
-            assumption=context_note,
+            confidence=confidence,
+            assumption=assumption,
             superseded=[f"{p.document} (v{p.version})" for p in rest],
             signals=signals, rejected=rejected,
         )
@@ -520,6 +621,79 @@ def resolve(
         reason="Ambiguous across agreements; clarification disabled.",
         confidence="Low", options=options, signals=signals, rejected=rejected,
     )
+
+
+def _calibrate(
+    chosen: DocumentProfile, signals: dict, context_note: str, sole: bool
+) -> tuple[str, str]:
+    """(confidence, assumption) under the Confidence Calibration Policy.
+
+    Certainty comes from independent signals AGREEING, never from one signal
+    or a similarity score. An explicit name (filename or agreement-type
+    alias) is enough on its own; inferred signals (party, defined term,
+    clause, version) need a second independent one to reach High. Conflicting
+    evidence or missing metadata on the winner caps confidence at Medium —
+    and Medium means "most likely, alternatives remain plausible", so the
+    assumption is always stated and easy to correct. `sole` marks the case
+    where the corpus holds no other agreement at all, which is certainty of
+    the strongest kind regardless of signals.
+    """
+    if context_note:
+        return "Medium", context_note
+    explicit = {"filename", "doc_type"} & signals.keys()
+    inference = {"organization", "defined_terms", "clause_refs", "version"} & signals.keys()
+    conflicted = bool(signals.get("conflicts"))
+    sparse = (not chosen.organizations and not chosen.defined_terms
+              and len(chosen.clause_numbers) <= 1)
+    if not (explicit or inference):
+        return ("High", "") if sole else ("Medium", "")
+    if conflicted or (not explicit and (len(inference) < 2 or sparse)):
+        assumption = (
+            f"Assumed the question is about the {chosen.doc_type_label} "
+            f"v{chosen.version} ({chosen.document}) because "
+            f"{_basis_from_signals(signals)}. Name the agreement to "
+            "override this assumption."
+        )
+        return "Medium", assumption
+    return "High", ""
+
+
+def _basis_from_signals(signals: dict) -> str:
+    """Human-readable grounds for a single-candidate selection, used in the
+    stated assumption when confidence is only Medium."""
+    bits = []
+    if "organization" in signals:
+        bits.append("a party to it is named in the question")
+    if "defined_terms" in signals:
+        quoted = ", ".join(f'"{t}"' for t in signals["defined_terms"][:3])
+        bits.append(f"it is the only candidate defining {quoted}")
+    if "clause_refs" in signals:
+        refs = ", ".join(f"Clause {c}" for c in signals["clause_refs"][:3])
+        bits.append(f"it is the only candidate containing {refs}")
+    if "version" in signals:
+        bits.append(f"it matches the requested version v{signals['version']}")
+    if "doc_type" in signals:
+        bits.append("its agreement type matches the question")
+    return " and ".join(bits) or "it best matches the question's signals"
+
+
+def explain_selection(resolution: DocumentResolution) -> str:
+    """Concise "why was this agreement selected" explanation, derived from
+    the audit evidence — matching parties, terms, clauses, type — never from
+    internal scores or implementation details."""
+    if not resolution.documents:
+        return f"No agreement was selected. {resolution.reason}".strip()
+    lines = [
+        f"Selected {', '.join(resolution.documents)} "
+        f"({resolution.confidence} confidence): {resolution.reason}"
+    ]
+    if resolution.assumption:
+        lines.append(resolution.assumption)
+    for conflict in resolution.signals.get("conflicts", []):
+        lines.append(f"Conflicting evidence noted: {conflict}.")
+    for doc, why in resolution.rejected.items():
+        lines.append(f"- {doc} was not used: {why}.")
+    return "\n".join(lines)
 
 
 def _clarification_text(question: str, candidates: list[DocumentProfile]) -> str:
