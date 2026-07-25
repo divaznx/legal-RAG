@@ -19,6 +19,9 @@ self-reported by the model.
 | API        | FastAPI                                                 |
 | UI         | Streamlit                                               |
 | CLI        | `cli.py`                                                |
+| Tenancy    | one Qdrant collection + manifest + cache per tenant     |
+| Auth       | SHA-256-hashed API keys, two roles, tenant bound to key |
+| Audit      | SQLite, append-only triggers + SHA-256 hash chain       |
 
 ## The legal intelligence layer
 
@@ -224,14 +227,25 @@ pip install -r requirements.txt
 copy .env.example .env            # adjust as needed
 ```
 
+Then issue a key for whoever will use the API (the CLI and UI don't need
+one — they run as the local operator):
+
+```bash
+python cli.py keys add --label "Jane Doe, Ashby LLP" --tenant ashby --role analyst
+```
+
+If you skip this, the API mints a bootstrap admin key at startup and prints
+it once to the server log.
+
 ## Use
 
-**CLI** (fastest way to try it):
+**CLI** (fastest way to try it) — `--tenant` defaults to `DEFAULT_TENANT`:
 
 ```bash
 python cli.py ingest sample_docs/MSA_Acme_v1.0.txt sample_docs/MSA_Acme_v2.1.txt
 python cli.py ask "What is the termination notice period, and do the versions agree?"
 python cli.py docs
+python cli.py audit tail
 ```
 
 **Streamlit UI**:
@@ -240,11 +254,25 @@ python cli.py docs
 streamlit run ui/app.py
 ```
 
-**API**:
+**API** (authenticated — see [Tenancy, keys, and the audit log](#tenancy-keys-and-the-audit-log)):
 
 ```bash
 uvicorn api:app --reload --port 8000
-# POST /documents (multipart upload) · GET /documents · DELETE /documents/{name} · POST /ask
+```
+
+| Endpoint | Role | |
+|---|---|---|
+| `GET /health` | — | liveness; the only unauthenticated route |
+| `GET /me` | analyst | what this key is and what it can do |
+| `GET /documents` | analyst | manifest for the key's tenant |
+| `POST /documents` | **admin** | multipart upload → parse/redact/index |
+| `DELETE /documents/{name}` | **admin** | remove a document and its vectors |
+| `POST /ask` · `POST /ask/stream` | analyst | grounded answer (SSE for the stream) |
+| `GET /audit` | **admin** | the tenant's own audit trail + chain status |
+| `GET /v1/models` · `POST /v1/chat/completions` | analyst | OpenAI-compatible surface |
+
+```bash
+curl -H "Authorization: Bearer lxs_..." http://localhost:8000/documents
 ```
 
 **Open WebUI** (chat frontend):
@@ -274,7 +302,9 @@ Notes:
   routed straight to the underlying LLM, skipping the RAG pipeline.
 - Already have Open WebUI or Docker? Just add an OpenAI connection with
   base URL `http://localhost:8000/v1` (from a container:
-  `http://host.docker.internal:8000/v1`) and any API key.
+  `http://host.docker.internal:8000/v1`). The API key field is no longer a
+  dummy value — put a real Lexis key there (`python cli.py keys add`), and
+  that key decides which tenant's documents the chat can see.
 
 **Qdrant server** (run everything at once):
 
@@ -293,6 +323,109 @@ every Lexis process talks to the server and runs concurrently. Comment
 one-process rule applies again. (Open WebUI never touches the store — it
 talks to the API over HTTP either way.)
 
+## Tenancy, keys, and the audit log
+
+Three things separate a demo from something a firm can put its clients'
+contracts into. None of them is about answer quality, and all three are the
+first questions a client's IT reviewer asks.
+
+### Isolation is a collection boundary, not a filter
+
+Each tenant — a client, a matter group, a practice area — gets its own
+Qdrant collection (`lexis_chunks_v3__<tenant>`), its own manifest, its own
+answer cache, and its own upload directory. Qdrant also supports payload
+partitioning, which scales to far more tenants, but it makes isolation a
+property of every query being written correctly: one `fetch_*` helper that
+forgets the tenant condition leaks another client's contract into an answer,
+and nothing fails loudly when it does. Making the tenant part of the
+collection *name* means there is no shared collection to leak from.
+
+The tenant travels in a `ContextVar` (`lexis/tenancy.py`) rather than as a
+parameter threaded through the planner, retrieval, and engine — there are
+only three storage seams to bind, and dozens of call sites between them that
+have no business knowing about tenants.
+
+### The key decides the tenant
+
+The tenant is **never** read from a header, query parameter, or request
+body. It comes from the API key and nothing else, because any of those
+alternatives would reduce the isolation boundary to a string the caller
+controls.
+
+```bash
+python cli.py keys add --label "Jane Doe, Ashby LLP" --tenant ashby --role analyst
+python cli.py keys list
+python cli.py keys revoke <key-id>
+python cli.py tenants
+```
+
+Keys are shown once and stored as SHA-256 digests — a stolen `api_keys.json`
+is not a stolen deployment. (SHA-256 rather than bcrypt is deliberate: the
+input is 32 bytes of `secrets` entropy, not a human-chosen password, so
+there is no dictionary to slow down.) The store is re-read whenever it
+changes, so a revocation takes effect on the next request rather than the
+next restart.
+
+Two roles. `analyst` asks questions and lists documents; `admin` also
+ingests, deletes, and reads the audit trail. The split exists because
+ingestion and deletion change what *every future answer* is grounded in — a
+reviewer who can ask questions should not silently be able to remove the
+clause that makes an answer inconvenient.
+
+With no keys yet, the API mints one admin key at startup and prints it once.
+An appliance that boots with no way in is a support call; one that boots
+with a blank password is a breach.
+
+### The audit log is append-only, and says so in two places
+
+`data/audit.db` records every question, answer, evidence set, ingest,
+deletion, and rejected request. Two mechanisms, because they fail
+differently:
+
+1. **SQLite triggers** reject `UPDATE` and `DELETE` on the events table —
+   covering this application, a support script, and an operator with the
+   `sqlite3` CLI.
+2. **A SHA-256 hash chain** across rows, which covers the case the triggers
+   cannot: someone with filesystem access rebuilding the database.
+
+```bash
+python cli.py audit tail --tenant ashby --limit 25
+python cli.py audit verify
+```
+
+Being precise rather than claiming "tamper-proof": the chain detects
+modified and mid-log deleted rows on its own. It cannot detect *truncation*
+of the newest rows, because a shortened chain is internally consistent.
+`audit verify` prints the head hash for exactly this reason — copy it
+somewhere the deployment cannot reach and truncation becomes detectable too.
+
+Evidence is stored as citations (document, page, section, clause, and why
+each chunk was retrieved), not as chunk text: enough to reconstruct what the
+model was shown, without turning the audit log into a second and less
+protected copy of the corpus.
+
+### What is deliberately not here
+
+Key management is CLI-only. A network endpoint that mints credentials is a
+much larger blast radius than one that answers questions, and an on-prem
+appliance has a console. The Streamlit UI has no authentication of its own
+and can switch tenants freely — it is an operator console for the server's
+own desktop, not something to expose; its actions are still audited,
+attributed to the OS user.
+
+### Upgrading an existing corpus
+
+A corpus ingested before tenancy existed lives in an unsuffixed collection
+and `data/manifest.json`, so it will look empty. Adopt it without
+re-embedding (start the Qdrant server first if `QDRANT_URL` is set):
+
+```bash
+python cli.py migrate --tenant default
+```
+
+Vectors are copied, not moved — verify with `python cli.py docs`, then drop
+the old collection yourself.
+
 ## Answer anatomy
 
 Every answer carries two verdicts:
@@ -310,10 +443,26 @@ Every answer carries two verdicts:
   Streamlit UI against the same `QDRANT_PATH` fails; the error now names the
   cause and the fix. For any multi-user deployment, run a Qdrant server and
   set `QDRANT_URL`.
-- **No authentication, tenancy, or audit log.** Every caller sees every
-  ingested document. Before a multi-client deployment you need auth on the
-  API, per-tenant collection isolation, and a persisted query/answer log —
-  none of which are present.
+- **Authentication is a bearer key, not an identity system.** There is no
+  SSO, no per-user accounts, and no expiry: a key is a long-lived secret
+  scoped to one tenant and one role. Attribution in the audit log is only as
+  good as the discipline of issuing one key per person rather than one per
+  firm. Anything stronger (OIDC, SCIM, short-lived tokens) is a real project,
+  not a setting.
+- **Transport security is the deployment's job.** Keys travel in a header;
+  serve the API over TLS or keep it on a private network. Nothing in the app
+  refuses plain HTTP.
+- **The audit log detects tampering; it does not prevent it.** See the
+  truncation caveat above — without an off-box copy of the head hash, the
+  newest rows can be removed and the chain will still verify.
+- **Chain verification is a full scan.** `GET /audit` and `cli.py audit
+  verify` rehash every row, which is linear in the size of the log. That is
+  fine for an admin-only call on a log of tens of thousands of rows and
+  wrong as a per-request check; don't put it on a dashboard that polls.
+- **`AUTH_ENABLED=false` is a real footgun.** It exists for local
+  development and makes every caller an admin of the default tenant. The API
+  logs a warning on every startup where it is set, which is the only thing
+  stopping a temporary local override from quietly shipping.
 - Injection detection is a curated regex tripwire, not a classifier. It will
   miss novel phrasings; that is why the output stripper and the confidence
   downgrade exist behind it.
@@ -376,8 +525,11 @@ lexis/
   prompts.py       unified Analyst/Researcher/Writer prompt + citation contract
   llm.py           Ollama call + mechanical citation verification
   engine.py        plan -> retrieve -> generate -> verify -> computed confidence
-cli.py             ingest / ask / docs / delete
-api.py             FastAPI endpoints
+  tenancy.py       per-tenant collection / manifest / cache scoping (ContextVar)
+  auth.py          hashed API keys, roles, tenant binding
+  audit.py         append-only SQLite log + SHA-256 hash chain
+cli.py             ingest / ask / docs / delete + keys / audit / tenants / migrate
+api.py             FastAPI endpoints, key auth, per-request audit
 ui/app.py          Streamlit chat with verification badge + legal reasoning panel
 sample_docs/       two MSA versions with deliberate conflicts, an NDA, a service
                    order, and an 18-clause SaaS agreement with sub-clauses,

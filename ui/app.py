@@ -5,10 +5,17 @@ Run:  streamlit run ui/app.py
 Imports the engine directly (no API hop). Note the embedded Qdrant store is
 single-process: stop the FastAPI server first, or point both at a Qdrant
 server via QDRANT_URL.
+
+**This console has no authentication of its own.** It is an operator tool:
+whoever can open it can switch tenants freely, so it belongs on the server's
+own desktop or behind a network control, never on a port a client can reach.
+Client access goes through the API, where a key fixes the tenant. Actions
+taken here are still written to the audit log, attributed to the OS user.
 """
 
 from __future__ import annotations
 
+import getpass
 import sys
 import tempfile
 from pathlib import Path
@@ -17,7 +24,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import streamlit as st
 
-from lexis import engine, ingest, llm
+from lexis import audit, engine, ingest, llm, tenancy
+from lexis.auth import Principal
+from lexis.config import settings
 
 st.set_page_config(page_title="Lexis Enterprise", page_icon="⚖️", layout="wide")
 
@@ -30,10 +39,33 @@ def _warm() -> bool:
 
 _warm()
 
+
+def _operator() -> Principal:
+    return Principal(key_id="ui", label=f"ui:{getpass.getuser()}",
+                     tenant=tenancy.current(), role="admin")
+
+
 # ---------------------------------------------------------------- sidebar
 with st.sidebar:
     st.title("⚖️ Lexis Enterprise")
     st.caption("Grounded legal retrieval — answers only from your documents, every citation verified.")
+
+    # Bound before anything reads the manifest or the vector store, because
+    # every call below this line is scoped to whatever is selected here.
+    st.subheader("Tenant")
+    known = tenancy.known_tenants() or [settings.default_tenant]
+    chosen = st.text_input(
+        "Client / matter group", value=st.session_state.get("tenant", settings.default_tenant),
+        help="Documents, answer cache, and audit entries are isolated per tenant. "
+             f"Existing: {', '.join(known)}",
+    )
+    try:
+        active = tenancy.set_current(chosen)
+        st.session_state["tenant"] = active
+    except tenancy.InvalidTenant as exc:
+        st.error(str(exc))
+        st.stop()
+    st.caption(f"Working in **{active}** · switching here changes which corpus is searched.")
 
     if not llm.llm_available():
         st.error("LLM endpoint unreachable. Start Ollama (`ollama serve`) or set OLLAMA_BASE_URL.")
@@ -63,9 +95,17 @@ with st.sidebar:
             try:
                 report = ingest.ingest_file(tmp)
             except ValueError as exc:
+                audit.record("ingest", outcome="error", principal=_operator(), client="ui",
+                             detail={"document": name, "error": str(exc)})
                 st.session_state.session_failed.add(name)
                 st.error(f"{name}: {exc}")
                 continue
+        audit.record(
+            "ingest", principal=_operator(), client="ui", documents=[report.document],
+            detail={"version": report.version, "pages": report.pages, "chunks": report.chunks,
+                    "redactions": report.redactions, "low_ocr_pages": report.low_ocr_pages,
+                    "injection_flagged": bool(report.injection.get("flagged"))},
+        )
         st.session_state.session_uploads.add(name)
         redactions = ", ".join(f"{k}×{v}" for k, v in report.redactions.items()) or "none"
         st.success(f"{report.document}: {report.chunks} chunks, redactions: {redactions}")
@@ -86,6 +126,8 @@ with st.sidebar:
     # …and files removed from the uploader are deleted from the vector store.
     for name in st.session_state.session_uploads - current:
         ingest.delete_document(name)
+        audit.record("delete", principal=_operator(), client="ui", documents=[name],
+                     detail={"via": "uploader removal"})
         st.session_state.session_uploads.discard(name)
         st.toast(f"Removed {name} from the index", icon="🗑")
     st.session_state.session_failed &= current
@@ -101,10 +143,13 @@ with st.sidebar:
             # keep the name in session_uploads: if its chip is still in the
             # uploader, forgetting it would auto-re-ingest on the next rerun
             ingest.delete_document(name)
+            audit.record("delete", principal=_operator(), client="ui", documents=[name])
             st.rerun()
     if manifest and st.button("Remove all indexed documents", use_container_width=True):
         for name in list(manifest):
             ingest.delete_document(name)
+        audit.record("delete", principal=_operator(), client="ui", documents=list(manifest),
+                     detail={"via": "remove all"})
         st.rerun()
 
 # ---------------------------------------------------------------- chat
@@ -150,6 +195,7 @@ if question:
 
         st.write_stream(_deltas())
         result = holder["result"]
+        audit.answer_event(result, principal=_operator(), client="ui")
 
         badge = "✅ VERIFIED" if result.citations.passed else "⚠️ UNVERIFIED"
         cached = " · ⚡ semantic cache hit" if result.cached else ""

@@ -1,8 +1,11 @@
 """Ingestion pipeline: parse -> redact -> chunk -> embed -> upsert.
 
-A JSON manifest under data/manifest.json records every ingested document
-(version, page count, chunk count, redaction summary) and backs the
-document-listing endpoints.
+A JSON manifest under data/tenants/<tenant>/manifest.json records every
+ingested document (version, page count, chunk count, redaction summary) and
+backs the document-listing endpoints. It is per-tenant for the same reason
+the vector collection is: the manifest is also the input to document
+resolution, so one shared across tenants would let a question resolve to an
+agreement the asker cannot see.
 """
 
 from __future__ import annotations
@@ -13,8 +16,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import chunking, embeddings, parsing, redaction, security, vector_store
-from .config import settings
+from . import chunking, embeddings, parsing, redaction, security, tenancy, vector_store
 from .legal import profile as legal_profile
 from .legal.profile import DocumentProfile
 
@@ -40,7 +42,7 @@ class IngestReport:
 
 
 def _manifest_path() -> Path:
-    return settings.data_path / "manifest.json"
+    return tenancy.data_path() / "manifest.json"
 
 
 def load_manifest() -> dict[str, dict]:

@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     # concepts, xrefs). The bump also forces a re-ingest, which is deliberate —
     # v2 chunks were written by the pre-fix chunker and carry section labels
     # that can be off by one clause.
+    #
+    # This is a PREFIX, not the collection name: each tenant gets
+    # "<prefix>__<tenant>" (see lexis/tenancy.py). Isolation is by collection,
+    # so a query that forgets to filter cannot cross a tenant boundary.
     qdrant_collection: str = "lexis_chunks_v3"
 
     # Embeddings (fastembed / ONNX)
@@ -87,11 +91,41 @@ class Settings(BaseSettings):
     # a possible scan (low OCR confidence).
     low_text_chars_per_page: int = 200
 
+    # --- Tenancy, authentication, audit ---
+    # Tenant used by the CLI/UI and by any caller that names none.
+    default_tenant: str = "default"
+    # API-key authentication on the HTTP API. Off is a development-only
+    # setting: with it off, anyone who can reach the port reads every
+    # document of every tenant. The API logs a warning on every startup where
+    # it is disabled so that a temporary local override cannot quietly ship.
+    auth_enabled: bool = True
+    # Append-only query/ingest/deletion log. Kept separate from auth so it
+    # can be left on for the CLI-only case, and because "who saw what" is the
+    # record a client needs whether or not the HTTP API is in use.
+    audit_enabled: bool = True
+    # Answers are recorded in full by default: an audit trail that records a
+    # question but not what the system replied cannot settle the dispute it
+    # exists for. Set false where the log has a weaker retention story than
+    # the corpus itself — the citation set is still recorded either way.
+    audit_store_answers: bool = True
+
     @property
     def data_path(self) -> Path:
         p = Path(self.data_dir)
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+    @property
+    def api_keys_path(self) -> Path:
+        """Key registry — deployment-wide, not per-tenant (a key names its
+        tenant, so the registry has to sit above them)."""
+        return self.data_path / "api_keys.json"
+
+    @property
+    def audit_db_path(self) -> Path:
+        """One log, one hash chain, all tenants — a per-tenant chain would be
+        as easy to drop wholesale as the tenant's own data."""
+        return self.data_path / "audit.db"
 
 
 settings = Settings()

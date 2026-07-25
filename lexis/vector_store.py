@@ -13,19 +13,24 @@ legal address. "Show me Clause 6.2" is a lookup, and answering it with the
 nearest neighbour in embedding space is how a system ends up quoting Clause 5
 under a Clause 6 heading.
 
+Every read and write is scoped to the calling tenant's own collection
+(`lexis/tenancy.py`), so cross-tenant leakage is not something a query can
+get wrong.
+
 Runs embedded (on-disk) by default; set QDRANT_URL to use a server.
 """
 
 from __future__ import annotations
 
 import atexit
+import threading
 import warnings
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 from qdrant_client import QdrantClient
 from qdrant_client import models as qm
 
+from . import tenancy
 from .chunking import Chunk
 from .config import settings
 from .embeddings import EMBEDDING_DIM
@@ -49,8 +54,30 @@ class StoreUnavailable(RuntimeError):
     """Raised with actionable guidance when the vector store cannot be opened."""
 
 
-@lru_cache(maxsize=1)
+_client: QdrantClient | None = None
+_client_lock = threading.Lock()
+
+
 def client() -> QdrantClient:
+    """The process-wide store handle, opened once.
+
+    Double-checked locking rather than `lru_cache`, which is not atomic under
+    contention: two threads missing the cache together both run the factory,
+    and for the embedded store the second one hits the directory's exclusive
+    lock and fails. That is exactly the shape of the API's startup — a
+    background warmup thread opening the store while the first request opens
+    it too — so it showed up as an intermittent 503 on the first call.
+    """
+    global _client
+    if _client is not None:
+        return _client
+    with _client_lock:
+        if _client is None:
+            _client = _open_client()
+        return _client
+
+
+def _open_client() -> QdrantClient:
     if settings.qdrant_url:
         c = QdrantClient(url=settings.qdrant_url)
     else:
@@ -68,30 +95,72 @@ def client() -> QdrantClient:
                 "API and the UI are both running, stop one, or run a Qdrant "
                 "server and set QDRANT_URL to use both together."
             ) from exc
-    if not c.collection_exists(settings.qdrant_collection):
-        c.create_collection(
-            collection_name=settings.qdrant_collection,
-            vectors_config={"dense": qm.VectorParams(size=EMBEDDING_DIM, distance=qm.Distance.COSINE)},
-            sparse_vectors_config={"bm25": qm.SparseVectorParams(modifier=qm.Modifier.IDF)},
-        )
-        # Indexes are an optimisation only — the embedded store ignores them
-        # and filters by scan, which is correct but slower. Never let index
-        # creation (or its warning) surface as an ingestion failure.
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", UserWarning)
-            for field_name, schema in _INDEXED_FIELDS:
-                try:
-                    c.create_payload_index(
-                        collection_name=settings.qdrant_collection,
-                        field_name=field_name,
-                        field_schema=schema,
-                    )
-                except Exception:
-                    pass
     # close before interpreter teardown so the embedded store's __del__
     # doesn't fire after sys.meta_path is gone
     atexit.register(c.close)
     return c
+
+
+# Collections already known to exist in this process. The existence check is
+# a round trip, and every retrieval stage below needs the collection name, so
+# it would otherwise run several times per question.
+_ensured: set[str] = set()
+_ensure_lock = threading.Lock()
+
+
+def ensure_collection(name: str) -> str:
+    if name in _ensured:
+        return name
+    # Serialized for the same reason `client()` is: two threads racing the
+    # first question of a new tenant would both pass the existence check and
+    # both call create_collection.
+    with _ensure_lock:
+        if name in _ensured:
+            return name
+        c = client()
+        if not c.collection_exists(name):
+            c.create_collection(
+                collection_name=name,
+                vectors_config={
+                    "dense": qm.VectorParams(size=EMBEDDING_DIM, distance=qm.Distance.COSINE)
+                },
+                sparse_vectors_config={"bm25": qm.SparseVectorParams(modifier=qm.Modifier.IDF)},
+            )
+            # Indexes are an optimisation only — the embedded store ignores
+            # them and filters by scan, which is correct but slower. Never let
+            # index creation (or its warning) surface as an ingestion failure.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", UserWarning)
+                for field_name, schema in _INDEXED_FIELDS:
+                    try:
+                        c.create_payload_index(
+                            collection_name=name, field_name=field_name, field_schema=schema
+                        )
+                    except Exception:
+                        pass
+        _ensured.add(name)
+        return name
+
+
+def _collection() -> str:
+    """The current tenant's collection, created on first use.
+
+    Every read and write below goes through this. Tenant isolation is the
+    collection boundary itself, so there is no filter to forget.
+    """
+    return ensure_collection(tenancy.collection())
+
+
+def drop_tenant(tenant: str) -> bool:
+    """Delete a tenant's entire collection (offboarding). Returns False if it
+    was never created. Does not touch the tenant's manifest or the audit log —
+    the record of what was held has to outlive the data."""
+    name = tenancy.collection(tenant)
+    _ensured.discard(name)
+    if not client().collection_exists(name):
+        return False
+    client().delete_collection(name)
+    return True
 
 
 @dataclass
@@ -153,7 +222,7 @@ def upsert_chunks(
     sparse_vectors: list[qm.SparseVector],
 ) -> None:
     client().upsert(
-        collection_name=settings.qdrant_collection,
+        collection_name=_collection(),
         points=[
             qm.PointStruct(
                 id=chunk.id,
@@ -167,7 +236,7 @@ def upsert_chunks(
 
 def delete_document(document: str) -> None:
     client().delete(
-        collection_name=settings.qdrant_collection,
+        collection_name=_collection(),
         points_selector=qm.FilterSelector(filter=_doc_filter(document)),
     )
 
@@ -224,7 +293,7 @@ def hybrid_search(
     conditions = _documents_condition(documents)
     query_filter = qm.Filter(must=conditions) if conditions else None
     common = dict(
-        collection_name=settings.qdrant_collection,
+        collection_name=_collection(),
         limit=limit,
         with_payload=True,
         query_filter=query_filter,
@@ -252,7 +321,7 @@ def _scroll(conditions: list, limit: int, reason: str) -> list[RetrievedChunk]:
     if not conditions:
         return []
     points, _ = client().scroll(
-        collection_name=settings.qdrant_collection,
+        collection_name=_collection(),
         scroll_filter=qm.Filter(must=conditions),
         limit=limit,
         with_payload=True,
@@ -409,7 +478,7 @@ def clause_inventory(document: str) -> set[str]:
     offset = None
     while True:
         points, offset = client().scroll(
-            collection_name=settings.qdrant_collection,
+            collection_name=_collection(),
             scroll_filter=_doc_filter(document),
             limit=256,
             with_payload=["clause_number"],

@@ -2,6 +2,15 @@
 
 Run:  uvicorn api:app --reload --port 8000
 
+Every endpoint except /health requires an API key
+(`Authorization: Bearer lxs_...` or `X-API-Key: lxs_...`). The key names the
+tenant; the tenant is never read from a header, parameter, or body, so a
+caller cannot reach another client's corpus by editing a request. Ingestion
+and deletion additionally require the `admin` role.
+
+Every answer, ingestion, deletion, and rejected request is written to the
+append-only audit log before the response is returned.
+
 Latency: models + LLM are warmed in a background thread at startup;
 POST /ask/stream streams the answer as Server-Sent Events (event: delta
 per token batch, then event: result with the verified metadata).
@@ -14,29 +23,136 @@ server via QDRANT_URL if you need both).
 from __future__ import annotations
 
 import json
+import sys
 import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+from typing import Annotated, Callable
 
-from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Request, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from lexis import engine, ingest, llm
+from lexis import audit, auth, engine, ingest, llm, tenancy
 from lexis.config import settings
 from lexis.parsing import SUPPORTED_EXTENSIONS
+from lexis.vector_store import StoreUnavailable
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.auth_enabled:
+        minted = auth.bootstrap()
+        if minted is not None:
+            principal, secret = minted
+            # Shown once, never stored in plaintext. Losing it is recoverable
+            # (`python cli.py keys add --role admin`); leaking it is not.
+            print(
+                "\n" + "=" * 72
+                + f"\n  No API keys existed, so a bootstrap admin key was created for\n"
+                  f"  tenant '{principal.tenant}'. This is the only time it is shown:\n\n"
+                  f"      {secret}\n\n"
+                  f"  Revoke it once real keys are issued: "
+                  f"python cli.py keys revoke {principal.key_id}\n"
+                + "=" * 72 + "\n",
+                file=sys.stderr,
+            )
+    else:
+        print(
+            "[lexis] WARNING: AUTH_ENABLED=false - every caller who can reach this "
+            "port has admin access to the default tenant's documents. Development only.",
+            file=sys.stderr,
+        )
     threading.Thread(target=engine.warmup, daemon=True).start()
     yield
 
 
-app = FastAPI(title="Lexis Enterprise", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Lexis Enterprise", version="0.3.0", lifespan=lifespan)
+
+
+@app.exception_handler(StoreUnavailable)
+async def _store_unavailable(request: Request, exc: StoreUnavailable):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse({"detail": str(exc)}, status_code=503)
+
+
+# ---------------------------------------------------------------- auth
+# Key management is deliberately CLI-only. A network endpoint that mints
+# credentials is a much larger blast radius than one that answers questions,
+# and nothing about this product needs keys issued remotely.
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _presented_key(request: Request) -> str | None:
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[7:].strip()
+    return request.headers.get("x-api-key")
+
+
+async def _authenticate(request: Request) -> auth.Principal:
+    """Resolve the caller and bind their tenant for the rest of the request.
+
+    This must stay `async`: FastAPI runs sync dependencies in a worker
+    thread, and a ContextVar set inside a worker thread does not propagate
+    back to the request context — the tenant binding would silently be lost
+    and every caller would land on the default tenant.
+    """
+    if not settings.auth_enabled:
+        tenancy.set_current(settings.default_tenant)
+        return auth.Principal(
+            key_id="-", label="anonymous (auth disabled)",
+            tenant=settings.default_tenant, role="admin",
+        )
+
+    presented = _presented_key(request)
+    principal = auth.verify(presented)
+    if principal is None:
+        audit.record(
+            "auth", outcome="denied", tenant=settings.default_tenant,
+            client=_client_ip(request),
+            detail={"path": request.url.path, "key_presented": bool(presented)},
+        )
+        raise HTTPException(
+            401,
+            "Missing or invalid API key. Send `Authorization: Bearer lxs_...` "
+            "or `X-API-Key: lxs_...`.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    tenancy.set_current(principal.tenant)
+    return principal
+
+
+def _requires(role: str) -> Callable:
+    async def dependency(
+        request: Request,
+        principal: Annotated[auth.Principal, Depends(_authenticate)],
+    ) -> auth.Principal:
+        if not principal.can(role):
+            audit.record(
+                "authz", outcome="denied", principal=principal,
+                client=_client_ip(request),
+                detail={"path": request.url.path, "required_role": role},
+            )
+            raise HTTPException(
+                403, f"This operation requires the '{role}' role; "
+                     f"your key has '{principal.role}'.",
+            )
+        return principal
+
+    return dependency
+
+
+Analyst = Annotated[auth.Principal, Depends(_requires("analyst"))]
+Admin = Annotated[auth.Principal, Depends(_requires("admin"))]
 
 
 class AskRequest(BaseModel):
@@ -73,16 +189,25 @@ def _serialize(result: engine.AskResult) -> dict:
 
 @app.get("/health")
 def health() -> dict:
+    """Unauthenticated on purpose — load balancers and container health
+    checks need it, and it reveals nothing about the corpus."""
     return {"status": "ok", "llm_available": llm.llm_available()}
 
 
+@app.get("/me")
+def whoami(principal: Analyst) -> dict:
+    """Who this key is and what it can do — the first call to make when a
+    client reports a 403."""
+    return principal.as_dict()
+
+
 @app.get("/documents")
-def list_documents() -> dict:
+def list_documents(principal: Analyst) -> dict:
     return ingest.load_manifest()
 
 
 @app.post("/documents")
-async def upload_document(file: UploadFile) -> dict:
+async def upload_document(request: Request, file: UploadFile, principal: Admin) -> dict:
     name = Path(file.filename or "upload").name
     if not name.lower().endswith(SUPPORTED_EXTENSIONS):
         raise HTTPException(415, f"Unsupported file type; supported: {', '.join(SUPPORTED_EXTENSIONS)}")
@@ -96,22 +221,76 @@ async def upload_document(file: UploadFile) -> dict:
     if not payload:
         raise HTTPException(422, "Uploaded file is empty.")
 
-    uploads = settings.data_path / "uploads"
+    # Per-tenant upload directory: the originals are the un-redacted source
+    # documents, so two clients' files must not share a folder even though
+    # only the redacted chunks ever reach the vector store.
+    uploads = tenancy.data_path() / "uploads"
     uploads.mkdir(parents=True, exist_ok=True)
     dest = uploads / name
     dest.write_bytes(payload)
     try:
-        report = ingest.ingest_file(dest)
+        # Off the event loop: parsing, redaction, and embedding a large PDF
+        # is seconds of blocking CPU, and this handler has to be `async` for
+        # `await file.read()`. Left inline it stalls every concurrent
+        # request, including /health, for the duration of an ingest.
+        # run_in_threadpool copies the context, so the tenant binding
+        # established by the auth dependency travels with it.
+        report = await run_in_threadpool(ingest.ingest_file, dest)
     except ValueError as exc:
+        audit.record(
+            "ingest", outcome="error", principal=principal, client=_client_ip(request),
+            detail={"document": name, "error": str(exc)},
+        )
         raise HTTPException(422, str(exc)) from exc
+
+    audit.record(
+        "ingest", principal=principal, client=_client_ip(request),
+        documents=[report.document],
+        detail={
+            "version": report.version,
+            "pages": report.pages,
+            "chunks": report.chunks,
+            "bytes": len(payload),
+            "redactions": report.redactions,
+            "low_ocr_pages": report.low_ocr_pages,
+            # An injection finding recorded at ingest is the record that the
+            # uploader was warned, which matters if an answer is later
+            # disputed.
+            "injection_flagged": bool(report.injection.get("flagged")),
+        },
+    )
     return asdict(report)
 
 
 @app.delete("/documents/{document}")
-def delete_document(document: str) -> dict:
-    if not ingest.delete_document(document):
+def delete_document(request: Request, document: str, principal: Admin) -> dict:
+    deleted = ingest.delete_document(document)
+    audit.record(
+        "delete", outcome="ok" if deleted else "error", principal=principal,
+        client=_client_ip(request), documents=[document],
+        detail={} if deleted else {"error": "not found"},
+    )
+    if not deleted:
         raise HTTPException(404, f"No such document: {document}")
     return {"deleted": document}
+
+
+@app.get("/audit")
+def read_audit(principal: Admin, limit: int = 50, action: str | None = None) -> dict:
+    """This tenant's audit trail.
+
+    Scoped to the caller's own tenant with no override: an admin key is an
+    admin *of one client*, and the log is the one place where seeing another
+    tenant's rows would disclose their questions verbatim.
+    """
+    limit = max(1, min(limit, 500))
+    ok, checked, first_bad = audit.verify_chain()
+    return {
+        "tenant": principal.tenant,
+        "chain": {"intact": ok, "rows_checked": checked, "first_bad_seq": first_bad,
+                  "head": audit.head()},
+        "events": audit.query(tenant=principal.tenant, limit=limit, action=action),
+    }
 
 
 def _require_llm() -> None:
@@ -120,23 +299,31 @@ def _require_llm() -> None:
 
 
 @app.post("/ask")
-def ask(request: AskRequest) -> dict:
+def ask(http_request: Request, request: AskRequest, principal: Analyst) -> dict:
     _require_llm()
-    return _serialize(engine.ask(request.question, request.history))
+    result = engine.ask(request.question, request.history)
+    audit.answer_event(result, principal=principal, client=_client_ip(http_request))
+    return _serialize(result)
 
 
 @app.post("/ask/stream")
-def ask_stream(request: AskRequest) -> StreamingResponse:
+def ask_stream(http_request: Request, request: AskRequest, principal: Analyst) -> StreamingResponse:
     _require_llm()
+    # Captured here because the generator below runs after this handler has
+    # returned, and each of its steps executes in a fresh copy of the
+    # context — see tenancy.scoped, which re-binds the tenant around every
+    # step rather than relying on a binding surviving between them.
+    tenant, client_ip = principal.tenant, _client_ip(http_request)
 
     def events():
         for kind, payload in engine.ask_stream(request.question, request.history):
             if kind == "delta":
                 yield f"event: delta\ndata: {json.dumps(payload)}\n\n"
             else:
+                audit.answer_event(payload, principal=principal, client=client_ip)
                 yield f"event: result\ndata: {json.dumps(_serialize(payload))}\n\n"
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(tenancy.scoped(tenant, events()), media_type="text/event-stream")
 
 
 # --------------------------------------------------------------------------
@@ -260,7 +447,7 @@ def _completion_response(completion_id: str, created: int, text: str) -> dict:
 
 
 @app.get("/v1/models")
-def openai_models() -> dict:
+def openai_models(principal: Analyst) -> dict:
     return {
         "object": "list",
         "data": [
@@ -270,21 +457,30 @@ def openai_models() -> dict:
 
 
 @app.post("/v1/chat/completions")
-def openai_chat_completions(request: ChatCompletionRequest):
+def openai_chat_completions(
+    http_request: Request, request: ChatCompletionRequest, principal: Analyst
+):
+    # Chat frontends already send `Authorization: Bearer <key>`, so the
+    # per-tenant key goes in the connection settings that were previously
+    # filled with a dummy value — Open WebUI needs no changes beyond that.
     _require_llm()
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
+    tenant, client_ip = principal.tenant, _client_ip(http_request)
 
     question = _last_user_message(request.messages)
     if not question:
         raise HTTPException(422, "No user message found in `messages`.")
     if _is_meta_task(question):
+        # Title/tag generation carries no evidence and is not an answer about
+        # the corpus; logging it would bury the real questions.
         return _passthrough(request, completion_id, created)
 
     history = _prior_user_messages(request.messages)
 
     if not request.stream:
         result = engine.ask(question, history)
+        audit.answer_event(result, principal=principal, client=client_ip, action="ask:openai")
         return _completion_response(completion_id, created, result.answer + _verification_footer(result))
 
     def events():
@@ -293,10 +489,13 @@ def openai_chat_completions(request: ChatCompletionRequest):
             if kind == "delta":
                 yield _chunk_payload(completion_id, created, delta={"content": payload})
             else:
+                audit.answer_event(
+                    payload, principal=principal, client=client_ip, action="ask:openai"
+                )
                 yield _chunk_payload(
                     completion_id, created, delta={"content": _verification_footer(payload)}
                 )
         yield _chunk_payload(completion_id, created, delta={}, finish="stop")
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(events(), media_type="text/event-stream")
+    return StreamingResponse(tenancy.scoped(tenant, events()), media_type="text/event-stream")

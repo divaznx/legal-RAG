@@ -18,11 +18,15 @@ import json
 import math
 from pathlib import Path
 
+from . import tenancy
 from .config import settings
 
 
 def _cache_path() -> Path:
-    return settings.data_path / "answer_cache.json"
+    # Per-tenant: the fingerprint is built from the tenant's own manifest, so
+    # two tenants sharing a file would collide on questions asked of
+    # different corpora and serve each other's answers.
+    return tenancy.data_path() / "answer_cache.json"
 
 
 def corpus_fingerprint() -> str:
